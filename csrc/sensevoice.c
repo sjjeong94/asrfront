@@ -5,6 +5,7 @@
 
 #include "asrfront.h"
 #include "fft.h"
+#include "kernels.h"
 #include "melbank.h"
 
 #define KALDI_FRAME_LENGTH 400 /* 25 ms @ 16 kHz */
@@ -19,12 +20,17 @@
 struct af_sensevoice {
     af_sensevoice_config cfg; /* cmvn pointers point into cmvn below */
     float *cmvn;              /* [shift | scale], each n_mels * lfr_m; NULL if unused */
+    const af_kernels *k;
     af_rfft *fft;
     af_melbank *mel;
     unsigned long long rng;
     float window[KALDI_FRAME_LENGTH];
-    float frame[KALDI_PADDED];
-    float power[KALDI_N_BINS];
+    /* AF_VL-frame SoA work buffers */
+    float frames[KALDI_FRAME_LENGTH * AF_VL];
+    float re[KALDI_PADDED / 2 * AF_VL], im[KALDI_PADDED / 2 * AF_VL];
+    float scr_re[KALDI_PADDED / 2 * AF_VL], scr_im[KALDI_PADDED / 2 * AF_VL];
+    float power[KALDI_N_BINS * AF_VL];
+    float *melv;    /* n_mels * AF_VL */
     float *raw;     /* grow-only buffer for raw fbank before LFR */
     size_t raw_cap; /* in floats */
 };
@@ -66,7 +72,9 @@ int af_sensevoice_create(const af_sensevoice_config *cfg, af_sensevoice **out) {
         h->cfg.cmvn_scale = h->cmvn + dim;
     }
 
-    int rc = af_rfft_create(KALDI_PADDED, &h->fft);
+    h->k = af_kernels_select();
+    h->melv = malloc((size_t)cfg->n_mels * AF_VL * sizeof(float));
+    int rc = h->melv ? af_rfft_create(KALDI_PADDED, &h->fft) : AF_ENOMEM;
     if (rc == AF_OK)
         rc = af_melbank_kaldi(AF_SAMPLE_RATE, KALDI_PADDED, cfg->n_mels, KALDI_LOW_FREQ,
                               KALDI_HIGH_FREQ, &h->mel);
@@ -87,6 +95,7 @@ void af_sensevoice_destroy(af_sensevoice *h) {
         return;
     af_rfft_destroy(h->fft);
     af_melbank_destroy(h->mel);
+    free(h->melv);
     free(h->raw);
     free(h->cmvn);
     free(h);
@@ -128,13 +137,14 @@ static double rng_uniform(unsigned long long *s) { /* (0, 1] */
     return ((double)(r >> 11) + 1.0) / 9007199254740992.0;
 }
 
-static void add_dither(unsigned long long *s, float *x, int n, float dither) {
+/* x[i * stride] += dither * N(0, 1), i < n */
+static void add_dither(unsigned long long *s, float *x, int n, int stride, float dither) {
     for (int i = 0; i < n; i += 2) {
         double r = sqrt(-2.0 * log(rng_uniform(s)));
         double a = 6.283185307179586476925286766559 * rng_uniform(s);
-        x[i] += dither * (float)(r * cos(a));
+        x[(size_t)i * stride] += dither * (float)(r * cos(a));
         if (i + 1 < n)
-            x[i + 1] += dither * (float)(r * sin(a));
+            x[(size_t)(i + 1) * stride] += dither * (float)(r * sin(a));
     }
 }
 
@@ -142,43 +152,38 @@ static void add_dither(unsigned long long *s, float *x, int n, float dither) {
 /* Kaldi fbank                                                                         */
 /* ---------------------------------------------------------------------------------- */
 
-/* Log-mel energies of frame t into out[n_mels]. */
-static void fbank_frame(af_sensevoice *h, const float *audio, size_t t, float *out) {
-    const float *src = audio + t * KALDI_FRAME_SHIFT;
-    float *f = h->frame;
+/* Log-mel energies of frames t0 .. t0 + count - 1 into out[(t - t0) * n_mels + m]. */
+static void fbank_block(af_sensevoice *h, const float *audio, size_t t0, int count, float *out) {
+    const af_kernels *k = h->k;
+    const int n_mels = h->cfg.n_mels;
+    float *f = h->frames;
 
-    for (int k = 0; k < KALDI_FRAME_LENGTH; k++)
-        f[k] = src[k] * INPUT_SCALE;
+    /* Gather frames into lanes, scaled to int16 range. Dither is drawn lane by lane, in
+     * frame order, so the RNG sequence matches frame-by-frame processing. Unused lanes of
+     * the last block repeat lane 0. */
+    const float *src[AF_VL];
+    for (int l = 0; l < AF_VL; l++)
+        src[l] = audio + (t0 + (size_t)(l < count ? l : 0)) * KALDI_FRAME_SHIFT;
+    k->gather_scaled(src, KALDI_FRAME_LENGTH, INPUT_SCALE, f);
     if (h->cfg.dither > 0.0f)
-        add_dither(&h->rng, f, KALDI_FRAME_LENGTH, h->cfg.dither);
+        for (int l = 0; l < count; l++)
+            add_dither(&h->rng, f + l, KALDI_FRAME_LENGTH, AF_VL, h->cfg.dither);
 
-    /* remove_dc_offset */
-    double sum = 0.0;
-    for (int k = 0; k < KALDI_FRAME_LENGTH; k++)
-        sum += f[k];
-    const float mean = (float)(sum / KALDI_FRAME_LENGTH);
-    for (int k = 0; k < KALDI_FRAME_LENGTH; k++)
-        f[k] -= mean;
-
-    /* preemphasis: x[k] -= 0.97 x[k-1], x[0] -= 0.97 x[0] */
-    for (int k = KALDI_FRAME_LENGTH - 1; k > 0; k--)
-        f[k] -= KALDI_PREEMPH * f[k - 1];
-    f[0] -= KALDI_PREEMPH * f[0];
-
-    for (int k = 0; k < KALDI_FRAME_LENGTH; k++)
-        f[k] *= h->window[k];
-    memset(f + KALDI_FRAME_LENGTH, 0, (KALDI_PADDED - KALDI_FRAME_LENGTH) * sizeof(float));
-
-    af_rfft_power(h->fft, f, h->power);
-    af_melbank_apply(h->mel, h->power, out);
-    for (int m = 0; m < h->cfg.n_mels; m++)
-        out[m] = logf(fmaxf(out[m], FLT_EPSILON));
+    k->kaldi_prep(f, KALDI_FRAME_LENGTH, h->window, KALDI_PREEMPH, KALDI_PADDED, h->re, h->im);
+    k->rfft_power(h->fft, h->re, h->im, h->scr_re, h->scr_im, h->power);
+    k->mel(h->mel, h->power, h->melv);
+    k->log_floor(h->melv, (size_t)n_mels * AF_VL, FLT_EPSILON);
+    for (int l = 0; l < count; l++)
+        for (int m = 0; m < n_mels; m++)
+            out[(size_t)l * n_mels + m] = h->melv[(size_t)m * AF_VL + l];
 }
 
 static void fbank_raw(af_sensevoice *h, const float *audio, size_t n_frames, float *out) {
     h->rng = splitmix64(h->cfg.seed); /* reseed per call: same input -> same output */
-    for (size_t t = 0; t < n_frames; t++)
-        fbank_frame(h, audio, t, out + t * (size_t)h->cfg.n_mels);
+    for (size_t t0 = 0; t0 < n_frames; t0 += AF_VL) {
+        const int count = n_frames - t0 < AF_VL ? (int)(n_frames - t0) : AF_VL;
+        fbank_block(h, audio, t0, count, out + t0 * (size_t)h->cfg.n_mels);
+    }
 }
 
 int af_sensevoice_fbank_raw(af_sensevoice *h, const float *audio, size_t n_samples, float *out) {

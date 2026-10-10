@@ -250,11 +250,28 @@ void af_sensevoice_destroy(af_sensevoice *h);
   - Python wrapper overhead ~2.6 µs per call
 - Since batch parallelism is already handled from Python, M7 threading inside the C core is only needed for single long inputs.
 
-### M7. Optimization (3 days)
-- [ ] Benchmark scripts (`bench/`): asrfront vs. whisper (torch CPU), librosa, torchaudio kaldi, kaldi-native-fbank, FunASR
-- [ ] Sparse mel, SIMD FFT/power/mel, runtime dispatch
-- [ ] Profile (perf) and iterate on bottlenecks, rerunning accuracy tests at every step
-- [ ] Threading and batch parallelism
+### M7. Optimization (3 days) — done
+- [x] Benchmark scripts: `bench/compare.py` (asrfront vs. whisper/torch, librosa, torchaudio kaldi, kaldi-native-fbank, FunASR-style pipeline, batch scaling; `uv run --group ref --group bench python bench/compare.py`) and `bench/bench_frontend.c` (C-level totals + per-stage breakdown)
+- [x] Sparse mel, SIMD FFT/power/mel, runtime dispatch
+  - **8 frames per SIMD lane group** (SoA layout `buf[i * 8 + lane]`): FFT passes, fused split/power, mel, log, kaldi preprocessing all operate on 8 frames at once (`csrc/kernels.h`, `csrc/kernels_impl.c`)
+  - kernels use GCC/Clang vector extensions at the native width (8 floats with AVX, 4 with SSE2/NEON; plain floats for other compilers); 8×8 register transpose to gather frames; branch-free vectorized Cephes `logf` instead of libm (`log10f` alone was 1.2 ms / 30 s)
+  - `kernels_impl.c` is compiled twice on x86-64 (baseline SSE2 and `-mavx2`), selected at runtime via `__builtin_cpu_supports` / cpuid; `ASRFRONT_KERNELS=generic` forces the baseline; `_ext.kernel_isa()` reports it
+  - no FMA, no reassociation → **generic and AVX2 outputs are bit-identical** (tested for every signal and both frontends), and the SoA FFT matches the scalar FFT bit for bit (C test)
+- [x] Profiled with per-stage timers (no `perf` on this machine) and iterated, rerunning accuracy tests each time. Accuracy unchanged: whisper worst 4.0e-5, kaldi raw worst 7.7e-4. Tried and dropped: twiddle-free first stage (no measurable gain)
+- [x] Threading and batch parallelism: batch parallelism is done in M6 (Python thread pool). C-level threading for a single input is **not implemented**: one 30 s input takes < 1 ms, so the thread start-up and synchronization would eat most of the gain; `n_threads` stays reserved in the C config
+
+**Results** (30 s, i5-14400F, single thread, best of N; numbers vary ±10% between runs):
+
+| | asrfront (AVX2) | asrfront (generic SSE2) | reference | speed-up |
+|---|---|---|---|---|
+| Whisper log-mel 80×3000 | 0.85–0.95 ms | 1.67 ms | openai-whisper (torch) 8.6–9.6 ms | **~10x** |
+| | | | librosa STFT + mel (numpy) 6.6–7.0 ms | ~7.7x |
+| SenseVoice fbank + LFR + CMVN | 1.3–1.4 ms | 2.1 ms | FunASR WavFrontend (torchaudio) 12–14 ms | **~9–10x** |
+| kaldi fbank only | 1.3 ms | | torchaudio kaldi.fbank 11–12 ms / kaldi-native-fbank 18.7 ms* | ~9x / ~14x |
+
+\* kaldi-native-fbank via its Python API, including list conversion and per-frame access.
+
+Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success criterion 2 is met against torch (≥ 5x); against librosa it is ~7.7x, short of the 10x goal.
 
 ### M8. Packaging & CI (1 day)
 - [ ] GitHub Actions: build & test on Linux (x86_64/aarch64), macOS (arm64/x86_64), Windows

@@ -5,6 +5,7 @@
 
 #include "asrfront.h"
 #include "fft.h"
+#include "kernels.h"
 
 #define TWO_PI 6.283185307179586476925286766559
 
@@ -114,6 +115,43 @@ static void test_size(int n, double tol) {
     af_rfft_destroy(p);
 }
 
+/* The AF_VL-lane SoA kernel must reproduce the scalar power spectrum bit for bit. */
+static void test_soa_kernel(const af_kernels *k, int n) {
+    af_rfft *p = NULL;
+    if (af_rfft_create(n, &p) != AF_OK) {
+        failures++;
+        return;
+    }
+    const int m = n / 2;
+    float *x = malloc((size_t)n * AF_VL * sizeof(float));
+    float *re = malloc((size_t)m * AF_VL * sizeof(float)),
+          *im = malloc((size_t)m * AF_VL * sizeof(float));
+    float *sr = malloc((size_t)m * AF_VL * sizeof(float)),
+          *si = malloc((size_t)m * AF_VL * sizeof(float));
+    float *pw = malloc((size_t)(m + 1) * AF_VL * sizeof(float));
+    float *ref = malloc((size_t)(m + 1) * sizeof(float));
+    for (int i = 0; i < n * AF_VL; i++)
+        x[i] = uniform();
+    for (int l = 0; l < AF_VL; l++)
+        for (int i = 0; i < m; i++) {
+            re[i * AF_VL + l] = x[l * n + 2 * i];
+            im[i * AF_VL + l] = x[l * n + 2 * i + 1];
+        }
+    k->rfft_power(p, re, im, sr, si, pw);
+    int mismatches = 0;
+    for (int l = 0; l < AF_VL; l++) {
+        af_rfft_power(p, x + l * n, ref);
+        for (int i = 0; i <= m; i++)
+            mismatches += pw[i * AF_VL + l] != ref[i];
+    }
+    if (mismatches) {
+        fprintf(stderr, "%s kernel n=%d: %d bins differ from scalar FFT\n", k->name, n, mismatches);
+        failures++;
+    }
+    free(x), free(re), free(im), free(sr), free(si), free(pw), free(ref);
+    af_rfft_destroy(p);
+}
+
 static void test_invalid_sizes(void) {
     static const int bad[] = {0, -2, 1, 3, 14, 22, 26, 98};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
@@ -130,6 +168,15 @@ int main(void) {
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
         test_size(sizes[i], 1e-6);
     test_invalid_sizes();
+
+    extern const af_kernels af_kernels_generic;
+    const af_kernels *tables[] = {&af_kernels_generic, af_kernels_select()};
+    for (int t = 0; t < 2; t++)
+        for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+            if (sizes[i] >= 4) /* the SoA kernel needs at least one butterfly stage */
+                test_soa_kernel(tables[t], sizes[i]);
+    printf("SoA kernels (%s, %s) match the scalar FFT bit for bit\n", tables[0]->name,
+           tables[1]->name);
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

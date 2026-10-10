@@ -1,4 +1,5 @@
 #include "asrfront.h"
+#include "kernels.h"
 
 const char *af_version(void) {
     return ASRFRONT_VERSION;
@@ -17,4 +18,8 @@ const char *af_strerror(int err) {
     default:
         return "unknown error";
     }
+}
+
+const char *af_kernel_isa(void) {
+    return af_kernels_select()->name;
 }

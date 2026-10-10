@@ -6,15 +6,6 @@
 
 #include "asrfront.h"
 
-struct af_melbank {
-    int n_mels;
-    int n_bins;
-    int *start;  /* n_mels: first non-zero bin */
-    int *len;    /* n_mels: number of bins */
-    int *offset; /* n_mels: offset into w */
-    float *w;    /* concatenated weights */
-};
-
 /* Build the sparse bank from dense float weights (n_mels, n_bins). */
 static int from_dense(const float *dense, int n_mels, int n_bins, af_melbank **out) {
     af_melbank *mb = calloc(1, sizeof(*mb));

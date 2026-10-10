@@ -21,19 +21,44 @@ endif()
 # ---------------------------------------------------------------------------
 # C core: pure C11, links only against libm. No -ffast-math (reproducibility).
 # ---------------------------------------------------------------------------
+function(asrfront_c_options target)
+  target_include_directories(${target} PUBLIC csrc/include PRIVATE csrc)
+  set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
+  endif()
+endfunction()
+
+# SIMD kernels: the same source compiled per ISA, selected at runtime (kernels.c).
+# No FMA flags anywhere, so every variant gives bit-identical results.
+add_library(asrfront_kernels_generic OBJECT csrc/kernels_impl.c)
+target_compile_definitions(asrfront_kernels_generic PRIVATE AF_ISA=generic)
+asrfront_c_options(asrfront_kernels_generic)
+set(ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_kernels_generic>)
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$")
+  add_library(asrfront_kernels_avx2 OBJECT csrc/kernels_impl.c)
+  target_compile_definitions(asrfront_kernels_avx2 PRIVATE AF_ISA=avx2)
+  target_compile_options(asrfront_kernels_avx2 PRIVATE $<IF:$<C_COMPILER_ID:MSVC>,/arch:AVX2,-mavx2>)
+  asrfront_c_options(asrfront_kernels_avx2)
+  list(APPEND ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_kernels_avx2>)
+  set(ASRFRONT_HAVE_AVX2 ON)
+endif()
+
 add_library(asrfront_core STATIC
   csrc/common.c
   csrc/fft.c
+  csrc/kernels.c
   csrc/melbank.c
   csrc/whisper.c
   csrc/sensevoice.c
+  ${ASRFRONT_KERNEL_OBJECTS}
 )
-target_include_directories(asrfront_core PUBLIC csrc/include PRIVATE csrc)
-set_target_properties(asrfront_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-if(MSVC)
-  target_compile_options(asrfront_core PRIVATE /W4)
-else()
-  target_compile_options(asrfront_core PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
+asrfront_c_options(asrfront_core)
+if(ASRFRONT_HAVE_AVX2)
+  target_compile_definitions(asrfront_core PRIVATE AF_HAVE_AVX2=1)
 endif()
 if(UNIX)
   target_link_libraries(asrfront_core PUBLIC m)
@@ -71,7 +96,9 @@ endif()
 # C benchmarks
 # ---------------------------------------------------------------------------
 if(ASRFRONT_BUILD_BENCH)
-  add_executable(bench_fft bench/bench_fft.c)
-  target_include_directories(bench_fft PRIVATE csrc)
-  target_link_libraries(bench_fft PRIVATE asrfront_core)
+  foreach(b bench_fft bench_frontend)
+    add_executable(${b} bench/${b}.c)
+    target_include_directories(${b} PRIVATE csrc)
+    target_link_libraries(${b} PRIVATE asrfront_core)
+  endforeach()
 endif()

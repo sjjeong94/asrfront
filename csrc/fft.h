@@ -16,7 +16,25 @@ typedef struct af_cpx {
     float re, im;
 } af_cpx;
 
-typedef struct af_rfft af_rfft;
+#define AF_FFT_MAX_STAGES 32
+
+/* Plan layout, shared with the SIMD kernels (kernels_impl.c). */
+typedef struct af_fft_stage {
+    int radix;
+    int ns;
+    const af_cpx *tw; /* ns * (radix - 1): tw[j * (radix - 1) + k - 1] */
+} af_fft_stage;
+
+typedef struct af_rfft {
+    int n; /* real size */
+    int m; /* complex size n / 2 */
+    int n_stages;
+    af_fft_stage stages[AF_FFT_MAX_STAGES];
+    af_cpx *post_tw; /* m + 1: exp(-2*pi*i * k / n) */
+    af_cpx *buf[2];  /* m each: packed input / ping-pong */
+    af_cpx *spec;    /* m + 1: scratch for af_rfft_power */
+    void *mem;
+} af_rfft;
 
 /* AF_EINVAL if n is not even/positive or n/2 has a prime factor other than 2, 3, 5. */
 int af_rfft_create(int n, af_rfft **out);

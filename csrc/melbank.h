@@ -5,7 +5,15 @@
 #ifndef ASRFRONT_MELBANK_H
 #define ASRFRONT_MELBANK_H
 
-typedef struct af_melbank af_melbank;
+/* Layout shared with the SIMD kernels (kernels_impl.c). */
+typedef struct af_melbank {
+    int n_mels;
+    int n_bins;
+    int *start;  /* n_mels: first non-zero bin */
+    int *len;    /* n_mels: number of bins */
+    int *offset; /* n_mels: offset into w */
+    float *w;    /* concatenated weights */
+} af_melbank;
 
 /* librosa.filters.mel(sr, n_fft, n_mels, fmin, fmax) with htk=False, norm='slaney',
  * reproducing librosa's float32 rounding (as in whisper's mel_filters.npz). */

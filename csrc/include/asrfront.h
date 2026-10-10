@@ -31,6 +31,10 @@ enum {
 const char *af_version(void);
 const char *af_strerror(int err);
 
+/* SIMD kernel variant used by newly created handles: "avx2" or "generic".
+ * Set ASRFRONT_KERNELS=generic to force the baseline build (results are identical). */
+const char *af_kernel_isa(void);
+
 /* ------------------------------------------------------------------------ */
 /* Whisper log-mel spectrogram                                              */
 /* ------------------------------------------------------------------------ */

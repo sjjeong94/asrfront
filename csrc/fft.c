@@ -6,7 +6,6 @@
 
 #include "asrfront.h"
 
-#define MAX_STAGES 32
 #define TWO_PI 6.283185307179586476925286766559
 
 /*
@@ -20,23 +19,6 @@
  *
  * which leaves the output in natural order after the last stage.
  */
-typedef struct stage {
-    int radix;
-    int ns;
-    const af_cpx *tw; /* ns * (radix - 1): tw[j * (radix - 1) + k - 1] */
-} stage;
-
-struct af_rfft {
-    int n; /* real size */
-    int m; /* complex size n / 2 */
-    int n_stages;
-    stage stages[MAX_STAGES];
-    af_cpx *post_tw; /* m + 1: exp(-2*pi*i * k / n) */
-    af_cpx *buf[2];  /* m each: packed input / ping-pong */
-    af_cpx *spec;    /* m + 1: scratch for af_rfft_power */
-    void *mem;
-};
-
 static inline af_cpx cmul(af_cpx a, af_cpx b) {
     af_cpx r = {a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re};
     return r;
@@ -167,7 +149,7 @@ static int factorize(int m, int *radices) {
     static const int order[] = {4, 2, 3, 5};
     for (int i = 0; i < 4; i++) {
         while (m % order[i] == 0) {
-            if (count == MAX_STAGES)
+            if (count == AF_FFT_MAX_STAGES)
                 return -1;
             radices[count++] = order[i];
             m /= order[i];
@@ -177,7 +159,7 @@ static int factorize(int m, int *radices) {
 }
 
 int af_rfft_create(int n, af_rfft **out) {
-    int radices[MAX_STAGES];
+    int radices[AF_FFT_MAX_STAGES];
     if (!out)
         return AF_EINVAL;
     *out = NULL;
@@ -242,7 +224,7 @@ int af_rfft_size(const af_rfft *p) {
 static const af_cpx *cfft(af_rfft *p) {
     af_cpx *x = p->buf[0], *y = p->buf[1];
     for (int s = 0; s < p->n_stages; s++) {
-        const stage *st = &p->stages[s];
+        const af_fft_stage *st = &p->stages[s];
         const int stride = p->m / st->radix;
         const int nb = stride / st->ns;
         switch (st->radix) {

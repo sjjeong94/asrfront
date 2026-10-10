@@ -144,6 +144,9 @@ struct SenseVoice {
 NB_MODULE(_ext, m) {
     m.doc() = "asrfront native extension";
     m.attr("__version__") = af_version();
+    m.def("kernel_isa", &af_kernel_isa,
+          "SIMD kernel variant used by newly created frontends ('avx2' or 'generic'). "
+          "ASRFRONT_KERNELS=generic forces the baseline build; results are identical.");
 
     m.def(
         "_whisper_mel_filters",
