@@ -19,6 +19,7 @@ feat = asrfront.sensevoice.fbank(audio)  # (T', 560)  float32
 3. **Dependencies**: the C core links against nothing beyond libc/libm (FFT implemented in-house)
 
 **Out of scope (v1)**: resampling (input is assumed to be 16 kHz mono), audio file decoding, GPU, streaming (to be considered later).
+Audio loading (decode + downmix + resample, matching ffmpeg) is planned as **M9**, see §7.
 
 ---
 
@@ -289,6 +290,9 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 
 **Total estimate: ~12–13 working days** (all milestones implemented; first GitHub CI run pending)
 
+### M9. Audio loading (~6.5 days) — planned
+- WAV / raw PCM / FLAC / MP3 → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
+
 ---
 
 ## 5. Test Strategy
@@ -311,4 +315,263 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 3. **SenseVoice CMVN source**: `am.mvn` may differ per model, so instead of bundling it, accept a path/array as input. (Whether to bundle SenseVoiceSmall defaults for convenience is decided after checking the license.)
 4. **Input scale**: SenseVoice expects int16 scale (×32768). To avoid confusion when users pass floats already in int16 scale, make the `input_scale` argument explicit or document dtype-based automatic handling.
 5. **No `-ffast-math`**: avoided for reproducibility. Whether FMA is used (and resulting per-path differences) is also managed through tests.
-6. **Follow-up candidates**: streaming kaldi fbank (easy for SenseVoice since frames are independent), resampler, presets for additional models (Paraformer, other Whisper-style models, Qwen-Audio, etc.).
+6. **Follow-up candidates**: streaming kaldi fbank (easy for SenseVoice since frames are independent), resampler (→ M9, §7), presets for additional models (Paraformer, other Whisper-style models, Qwen-Audio, etc.).
+
+---
+
+## 7. M9: Audio Loading (`asrfront.load`)
+
+A loader in C whose only job is to produce the input that **Whisper** and **SenseVoiceSmall**
+expect: **decode → downmix → resample to 16 kHz → s16 quantization → float32**. One function, one
+argument, no options.
+
+```python
+import asrfront
+
+audio = asrfront.load("speech.mp3")  # (N,) float32 in [-1, 1), 16 kHz mono
+audio = asrfront.load(request_body)  # bytes: a WAV/FLAC/MP3 file in memory, or raw s16le PCM
+mel = asrfront.whisper.log_mel(audio)
+feat = asrfront.sensevoice.fbank(audio, cmvn="am.mvn")
+```
+
+**Why no options**: both models take the same input (16 kHz mono float32 in [-1, 1]), so a single
+fixed pipeline serves both. librosa-style knobs (`sr`, `mono`, `offset`, `duration`, `dtype`,
+`res_type`) are deliberately left out; users who need them can slice the returned array or use
+librosa. Options can be added later without breaking `load(source)`.
+
+### 7.1 Goals
+
+| Item | Decision |
+|---|---|
+| formats | **WAV**, **raw PCM** (headerless), **FLAC**, **MP3** |
+| reference | **ffmpeg** as invoked by openai-whisper `load_audio`: `ffmpeg -nostdin -threads 0 -i FILE -f s16le -ac 1 -acodec pcm_s16le -ar 16000 -` then `/ 32768` |
+| output (fixed) | 1-D float32, 16 kHz, mono (all channels downmixed), always rounded through int16 like `-f s16le` → exactly `int16 / 32768` |
+| input | a file path, or the file's bytes (`bytes` / `bytearray` / `memoryview`, e.g. an HTTP upload or a stream chunk) |
+| raw PCM (fixed) | **s16le, 16 kHz, mono** — the usual ASR convention. Raw PCM has no magic bytes, so: **path** → chosen by `.pcm` / `.raw` extension; **bytes** → chosen when no container magic is found (bytes have no extension) |
+| dependencies | still none at link time; FLAC/MP3 via vendored single-header decoders (public domain / MIT-0), compiled into `asrfront_core` |
+| not supported | AAC/M4A, Opus, Vorbis, video containers (→ clear `AF_EUNSUPPORTED` error suggesting ffmpeg) |
+
+**Accuracy targets** (vs. the ffmpeg pipeline above, compared as int16 samples):
+
+| Case | Target |
+|---|---|
+| WAV/PCM/FLAC, already 16 kHz mono | **bit-exact** |
+| downmix only (stereo → mono, 16 kHz) | bit-exact; ≤ 1 LSB if ffmpeg's integer rounding can't be reproduced exactly |
+| resample (8k/22.05k/24k/32k/44.1k/48k → 16k) | max abs ≤ **2 LSB** (≈ 6e-5), mean ≤ 0.5 LSB; same length as ffmpeg |
+| MP3 | decoder-dependent (different float pipeline from ffmpeg's `mp3float`): max abs ≤ 1e-3 after resample, **same length/alignment** (encoder delay & padding trimmed like ffmpeg) |
+| end-to-end Whisper | `whisper.log_mel(load(f))` vs. `whisper.log_mel_spectrogram(whisper.load_audio(f))` ≤ 1e-3; decoded text identical on jfk |
+| end-to-end SenseVoice | `sensevoice.fbank(load(f))` vs. FunASR `WavFrontend` on FunASR's own loaded audio: identical for 16 kHz WAV; for other rates only the resampler differs (FunASR loads/resamples with torchaudio — **to verify**), so measure the fbank difference and check decoded text is identical |
+
+### 7.2 Pin the ffmpeg behavior first (like §1)
+
+Everything below is **to be verified against the pinned ffmpeg version, by experiment first** (see
+§7.2.1 for how the swr source may be used) before writing the resampler. Current understanding:
+
+1. **Pipeline**: decoder output (s16 / s32 / fltp depending on codec) → auto-inserted `aresample`
+   (libswresample) doing rematrix + resample + format conversion to s16.
+2. **Downmix (`-ac 1`)**: swr builds a matrix with FL→FC and FR→FC at `M_SQRT1_2`, then
+   normalizes so the row sum is ≤ 1 for integer output → **0.5·L + 0.5·R** for stereo.
+   Multichannel (5.1 etc.) uses center/surround mix levels — implement the matrix builder for
+   the standard layouts (mono, stereo, 2.1, quad, 5.0, 5.1, 7.1) and fall back to equal-weight mean
+   for unknown layouts (documented deviation).
+3. **Resampler defaults** (`swr` engine): `filter_size=32`, `phase_shift=10` (1024 phases),
+   `filter_type=kaiser`, `kaiser_beta=9`, `cutoff=0.97` (relative to the lower Nyquist),
+   `exact_rational=1` (for rational ratios like 160/441 the phase count becomes the exact
+   denominator, so no linear interpolation between phases), `dither_method=none`.
+   Filter taps are generated in double, then stored in the internal sample format.
+4. **Internal sample format**: swr picks s16p / s32p / fltp / dblp depending on input/output
+   formats — this decides the rounding (s16 resampling uses 15-bit fixed-point taps and
+   `(acc + 0x4000) >> 15` with clipping). Must reproduce this choice per decoder output format to
+   reach bit-level agreement:
+   - WAV/FLAC 16-bit → likely s16p path (integer taps)
+   - MP3 (fltp) / 24-bit FLAC (s32) → float/s32 path
+5. **Edge handling**: initial delay (filter half-length, primed with zeros), flushing at EOF, and
+   exact output length `ceil(n_in * out_sr / in_sr)` vs. what ffmpeg actually emits — measure.
+6. **Float → s16**: `lrintf(x * 32768)` with saturation (no dither).
+7. **MP3 gapless**: ffmpeg reads the LAME/Xing header and skips `encoder_delay + 529` samples at the
+   start and the padding at the end. Check what `dr_mp3` does and replicate.
+
+Deliverable: `docs/load.md` — a **behavior spec** (parameters, rounding rules, delay/length rules,
+internal-format selection conditions, downmix coefficients; prose, formulas and tables only, **no
+code excerpts**) + a Python reference `ffmpeg_resample_ref` in `tests/python/reference.py`
+**written from that spec** and validated against the real ffmpeg (bit-exact for the integer path).
+
+#### 7.2.1 License policy (spec-first, clean-room style)
+
+libswresample is **LGPL-2.1+**; asrfront is MIT and statically links its C core into the wheel, so
+no LGPL-derived code may enter the repository (C *or* Python, tests included). Algorithms,
+parameter values and numeric rules (Kaiser-windowed-sinc polyphase filtering, `filter_size=32`,
+β=9, cutoff 0.97, 0.5/0.5 downmix, `(acc + 0x4000) >> 15` rounding) are not copyrightable;
+the code's expression (function structure, variable layout, table-generation code, comments) is.
+
+1. **Experiment first**: infer behavior from ffmpeg's output on probe signals — impulse
+   (→ filter taps and delay), DC (→ tap normalization, int rounding), sines (→ cutoff, passband),
+   lengths 0..N (→ output length / flush rule), stereo/5.1 test tones (→ downmix matrix).
+2. **Source only to resolve what experiments can't explain**, and only recorded as *behavior* in
+   `docs/load.md` (e.g. "taps are scaled by 2^15 and rounded to nearest"), never as code.
+   Note in the doc which facts came from experiment vs. source reading, with the ffmpeg version.
+3. **Implementation from the spec only**: M9.3 (`resample.c`, `remix.c`) and `ffmpeg_resample_ref`
+   are written from `docs/load.md` + standard DSP literature (e.g. J. O. Smith, "Digital Audio
+   Resampling"), without the swr source open. Own structure and naming; no copied comments,
+   constants tables or helper code.
+4. **Fallback**: if bit-exactness turns out to need code-level mimicry, drop the bit-exact goal
+   for that path and keep the ≤ 2 LSB target (§7.1). Impact is limited to `resample.c` / `remix.c`.
+5. **Other components**: dr_libs (Unlicense / MIT-0) is fine to vendor — ship `LICENSE.dr_libs`
+   and make sure `csrc/third_party/` is in the sdist. ffmpeg (incl. the GPL `imageio-ffmpeg`
+   build) and openai-whisper are **test-only tools** run as subprocess / imported in tests, never
+   bundled or linked → no effect on the wheel's license. MP3 patents have expired; FLAC is
+   royalty-free. Test fixtures are generated at test time, not vendored.
+6. Not legal advice; revisit if the project is used commercially with stricter requirements.
+
+### 7.3 C design
+
+New files:
+
+```
+csrc/
+├── audio_load.c                   # format sniffing, dispatch, downmix → resample → s16 → float
+├── wav.c                          # RIFF/RF64 parser
+├── pcm.c                          # raw PCM conversion (shared by wav)
+├── remix.c                        # ffmpeg-compatible downmix matrix
+├── resample.c / resample.h        # internal: swr-compatible polyphase resampler (s16 / float paths)
+└── third_party/
+    ├── dr_flac.h                  # mackron/dr_libs, pinned commit, public domain / MIT-0
+    ├── dr_mp3.h
+    └── LICENSE.dr_libs
+```
+
+**WAV** (in-house): `RIFF`/`RF64` (big-endian `RIFX` not supported), chunks `fmt `, `data`, skip `LIST`/`fact`/unknown
+(odd-size padding). Formats: PCM u8/s16/s24/s32, IEEE float32/64, `WAVE_FORMAT_EXTENSIBLE`
+(sub-format GUID + channel mask → layout for downmix). A-law/µ-law: cheap to add, optional.
+Truncated `data` size (streamed WAVs with size 0/0xFFFFFFFF) → read to EOF like ffmpeg.
+
+**Raw PCM**: fixed s16le / 16 kHz / mono, so it is just `int16 / 32768` (no resampling, no
+downmix). An odd trailing byte is dropped (to be checked against ffmpeg `-f s16le -ar 16000 -ac 1 -i`).
+
+**Format detection** by magic bytes (`RIFF..WAVE`, `RF64`, `fLaC`, `ID3`/MPEG frame sync), then:
+
+| source | magic found | no magic |
+|---|---|---|
+| path `*.pcm` / `*.raw` | raw PCM (extension wins) | raw PCM |
+| other path | that container | `AF_EUNSUPPORTED` |
+| bytes | that container | **raw PCM** (fallback) |
+
+- The bytes fallback means garbage bytes decode as noise instead of raising — accepted because raw
+  PCM bytes (streaming / websocket audio) are the main reason to pass bytes without a container.
+  Truncated or corrupt *containers* (magic present) still raise `AF_ECORRUPT`.
+- MPEG sniffing must be **strict** so raw PCM is never mistaken for MP3 (int16 `-1` is `FF FF`,
+  which looks like a frame sync): require a Layer III header with valid bitrate / sample-rate
+  indices **and** a second valid header at the computed frame offset (ID3v2 tag skipped first).
+  Tested with raw PCM of silence, `-1` runs, noise and speech.
+
+**Public API** (`asrfront.h`) — just load and free:
+
+```c
+enum { AF_EUNSUPPORTED = -4, AF_EIO = -5, AF_ECORRUPT = -6 };
+
+/* Load an audio file as 16 kHz mono float32 (ffmpeg/whisper-compatible).
+ * *out is allocated by the library; release it with af_audio_free. */
+int  af_load_file(const char *path_utf8, float **out, size_t *n_samples);
+/* Same for an in-memory file (detection table above). */
+typedef enum {
+    AF_RAW_AUTO = 0,  /* container if magic found, else raw PCM (bytes input) */
+    AF_RAW_NEVER = 1, /* container only, else AF_EUNSUPPORTED (path without .pcm/.raw) */
+    AF_RAW_FORCE = 2  /* always raw s16le 16 kHz mono (.pcm/.raw path) */
+} af_raw_mode;
+int  af_load_memory(const void *buf, size_t size, af_raw_mode raw, float **out, size_t *n_samples);
+void af_audio_free(float *p);
+```
+
+- Output size is unknown up front for compressed formats, so unlike the frontends the loader
+  allocates. Bound checks on every header field (`n_frames * channels` overflow, absurd sample
+  rates/channels → `AF_ECORRUPT`); fuzz-friendly.
+- `af_load_file` maps the extension to `AF_RAW_FORCE` / `AF_RAW_NEVER`; on Windows it converts
+  UTF-8 → UTF-16 and uses `_wfopen`. The Python binding reads the file itself and calls
+  `af_load_memory` for both paths and bytes (one code path, avoids path encoding issues).
+- The resampler and downmix are **internal** (`csrc/resample.h`, `csrc/remix.c`), not part of the
+  public API; tests reach them through the `_ext` test hooks like the existing internal kernels.
+  One-shot only (whole file in memory); a streaming resampler can be exposed later if needed.
+- Resampler hot loop: polyphase FIR, taps contiguous per phase; reuse the `kernels_impl.c`
+  multi-ISA scheme (dot products of 32 taps vectorize well). **Integer s16 path must stay
+  bit-identical across ISAs**; float path follows the existing no-FMA/no-reassociation rule.
+
+### 7.4 Python API
+
+```python
+def load(source: str | os.PathLike[str] | bytes | bytearray | memoryview) -> np.ndarray:
+    """Load audio as Whisper / SenseVoiceSmall input.
+
+    source: a file path, or the file's contents as bytes.
+    WAV, FLAC, MP3, or raw PCM (s16le, 16 kHz, mono): a `.pcm` / `.raw` path, or bytes
+    without a recognized container header.
+    Returns a 1-D float32 array at 16 kHz mono, identical to whisper.load_audio(path).
+    """
+```
+
+- `str` / `PathLike` → path (`str` is never interpreted as data). Any object supporting the buffer
+  protocol (`bytes`, `bytearray`, `memoryview`, 1-D uint8 `np.ndarray`) → bytes; must be
+  C-contiguous, read zero-copy (no copy of the input) while the GIL is released. The binding keeps a
+  reference to the buffer for the duration of the call; a `bytearray` mutated from another thread
+  during the call is undefined (documented). Other types → `TypeError`.
+- File-like objects (`BinaryIO`) are not accepted directly: `load(f.read())` (keeps one input rule).
+
+- Returns only the array (the rate is always 16 kHz; `asrfront.SAMPLE_RATE = 16000` exported for
+  reference). No `load_batch` / `resample` in the public API.
+- GIL released during decode/resample; zero-copy: the C buffer is wrapped in a capsule-owned ndarray.
+- Errors: `FileNotFoundError` / `OSError` for I/O, `ValueError` for corrupt or unsupported files
+  (message lists the supported formats and suggests converting with ffmpeg).
+
+### 7.5 Tests
+
+- **Reference tool**: ffmpeg is not installed here. Use the `imageio-ffmpeg` static binary in a new
+  `load` dependency group (pinned version, same on CI) and `openai-whisper`'s `load_audio` command
+  line; tests are skipped when ffmpeg is unavailable. Record the ffmpeg version in test output.
+- **Fixtures generated at test time** (not vendored) with ffmpeg / soundfile from the existing
+  `audio_signals.py` signals + jfk: every combination of
+  - container: WAV (u8, s16, s24, s32, f32, f64, extensible), raw PCM, FLAC (16/24-bit), MP3 (CBR/VBR, with/without Xing header)
+  - rate: 8000, 16000, 22050, 24000, 32000, 44100, 48000
+  - channels: 1, 2, 6 (5.1)
+- Compare `load()` vs. ffmpeg output: exact length, int16 max/mean diff per §7.1 targets.
+- Bytes input: `load(open(f, "rb").read()) == load(f)` for every fixture (container files);
+  raw PCM bytes == `.pcm` path; `bytearray` / `memoryview` / non-contiguous memoryview (→ error);
+  `str` is never treated as data.
+- Sniffing robustness: raw PCM bytes of silence, `-1` runs, noise, speech, and PCM that starts with
+  `FF Fx` must **not** be detected as MP3.
+- Edge cases: empty data chunk, truncated files, odd chunk sizes, odd-length `.pcm` / bytes,
+  empty bytes, 1-sample input, huge header sizes (must not allocate), non-audio file / unknown
+  extension → error.
+- End-to-end per §7.1: Whisper (`whisper.load_audio` + `log_mel_spectrogram`) and SenseVoice
+  (FunASR `WavFrontend` on FunASR-loaded audio).
+- C tests: WAV parser on hand-crafted byte buffers; resampler impulse/DC/sine (passband ripple,
+  stopband attenuation) through the internal header.
+- ISA consistency (`ASRFRONT_KERNELS=scalar|generic|avx2`) and ASan/UBSan job as in M8;
+  a small libFuzzer target for `af_load_memory` (run locally, optional in CI).
+
+### 7.6 Steps
+
+| Step | Contents | Est. |
+|---|---|---|
+| M9.1 | Pin ffmpeg behavior per §7.2.1: probe-signal experiments first, swr source only for unexplained gaps (behavior notes only); write the `docs/load.md` spec; then write `ffmpeg_resample_ref` (Python) **from the spec** and confirm downmix/resample/rounding/length rules bit-exact vs. ffmpeg | 1.5 d |
+| M9.2 | WAV + raw PCM parser, downmix, s16 rounding, `af_load_memory/file` + format detection rules, Python `load(path | bytes)` (no resampling yet: non-16 kHz → `AF_EUNSUPPORTED` temporarily) | 1 d |
+| M9.3 | Resampler **from `docs/load.md` + DSP literature only, swr source not consulted** (§7.2.1): s16 integer path + float path, exact length/delay handling; internal only (one-shot) | 1.5 d |
+| M9.4 | FLAC (dr_flac) + MP3 (dr_mp3, gapless trim) integration, strict MP3 sniffing | 1 d |
+| M9.5 | SIMD resampler kernels, benchmark vs. `whisper.load_audio` (ffmpeg subprocess) / `librosa.load`, end-to-end SenseVoice check, ASan + fuzz, README/docs, wheel size check | 1.5 d |
+
+**Total ~6.5 days.**
+
+### 7.7 Risks
+
+1. **swr internals are version-dependent** (defaults changed historically, e.g. `exact_rational`).
+   Pin one ffmpeg version as the reference and document it; accept ≤ 2 LSB elsewhere.
+2. **MP3 is not bit-exact by nature**: ffmpeg's decoder and dr_mp3 (minimp3-derived) differ in
+   float rounding. Alignment (delay/padding) matters more for ASR than LSB differences — test length
+   and cross-correlation lag = 0 explicitly.
+3. **Int path vs. float path**: if bit-exactness requires replicating swr's s16 fixed-point
+   resampling, the same file decoded as s16 vs. s32 takes different code paths — mirror swr's
+   internal format selection exactly.
+4. **Security**: parsing untrusted files in C. Strict bounds checks, no size from headers trusted
+   for allocation without validation against the buffer size, fuzzing (M9.5).
+5. **Wheel size / build**: dr_flac + dr_mp3 add ~10k lines of C; check compile warnings under
+   `-Wall -Wextra -Wpedantic` (compile them with relaxed warnings in a separate object library if needed).
+6. **LGPL contamination**: bit-exact swr compatibility tempts code-level mimicry. Follow §7.2.1
+   (spec-first, implementation without the source open); fall back to ≤ 2 LSB if needed.
