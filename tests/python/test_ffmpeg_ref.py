@@ -1,14 +1,14 @@
 """Validate the ffmpeg load-pipeline reference (``reference.py``, docs/load.md) against ffmpeg.
 
 Needs the ``load`` dependency group (``uv sync --group load``: imageio-ffmpeg with a pinned
-ffmpeg 7.0.2 binary); skipped otherwise. ffmpeg's float resampling kernel depends on the CPU:
-bit-exactness of the float path is only asserted on x86-64 with AVX2 + FMA3 (the CPU the spec
-was measured on); elsewhere a 1 LSB tolerance is used.
+ffmpeg 7.0.2 binary); skipped otherwise. ffmpeg's float arithmetic depends on the CPU:
+bit-exactness of the float path is only asserted when ffmpeg runs on x86-64 with AVX2 + FMA3
+(the CPU the spec was measured on); elsewhere (e.g. aarch64 / Apple silicon) the float path may
+differ by 1 LSB. See helpers.ffmpeg_is_reference_build.
 """
 
 from __future__ import annotations
 
-import platform
 import subprocess
 import wave
 from fractions import Fraction
@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import reference as ref
+from helpers import ffmpeg_is_reference_build
 
 imageio_ffmpeg = pytest.importorskip("imageio_ffmpeg")
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
@@ -28,17 +29,7 @@ COMMON_RATES = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 88
 EXACT_LENGTH_RATES = {8000, 11025, 12000, 16000, 24000, 32000, 48000, 96000}
 
 
-def _host_has_fma() -> bool:
-    if platform.machine().lower() not in ("x86_64", "amd64"):
-        return False
-    try:
-        flags = Path("/proc/cpuinfo").read_text()
-    except OSError:
-        return False
-    return " avx2" in flags and " fma" in flags
-
-
-FLOAT_PATH_EXACT = _host_has_fma()
+FLOAT_PATH_EXACT = ffmpeg_is_reference_build()
 
 
 def ffmpeg_raw(samples: np.ndarray, sample_fmt: str, sr: int, layout: str | None = None):
@@ -141,8 +132,13 @@ def check(
     )
 
 
-def uses_float_path(sample_fmt: str, sr: int) -> bool:
-    return sample_fmt in ("s16", "s32", "f32") and sr != 16000
+def uses_float_path(sample_fmt: str, sr: int, ch: int = 1) -> bool:
+    """Whether ffmpeg converts through float32 (docs/load.md, internal sample formats)."""
+    if sample_fmt == "f32":
+        return True
+    if sample_fmt == "s32":
+        return sr != 16000 or ch > 1
+    return sample_fmt == "s16" and sr != 16000
 
 
 # ---------------------------------------------------------------------------------------------
@@ -161,7 +157,7 @@ def test_convert_and_downmix(sample_fmt, ch):
         ref.ffmpeg_load_ref(x, sample_fmt, 16000),
         ffmpeg_raw(x, sample_fmt, 16000),
         16000,
-        loose,
+        uses_float_path(sample_fmt, 16000, ch),
         f"{sample_fmt} x{ch}",
         force_tol=1 if loose else None,
     )
@@ -191,7 +187,7 @@ def test_named_layout_downmix(layout, sample_fmt, sr):
         ref.ffmpeg_load_ref(x, sample_fmt, sr, layout=names),
         ffmpeg_raw(x, sample_fmt, sr, layout=layout),
         sr,
-        uses_float_path(sample_fmt, sr),
+        uses_float_path(sample_fmt, sr, len(names)),
         layout,
     )
 
@@ -239,7 +235,7 @@ def test_resample_multichannel(sample_fmt, ch):
         ref.ffmpeg_load_ref(x, sample_fmt, sr),
         ffmpeg_raw(x, sample_fmt, sr),
         sr,
-        uses_float_path(sample_fmt, sr),
+        uses_float_path(sample_fmt, sr, ch),
         f"{sample_fmt} x{ch} {sr}",
     )
 

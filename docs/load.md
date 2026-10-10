@@ -261,27 +261,45 @@ resamplers differ from each other (the largest differences sit in the top mel bi
 cutoff, and for 8 kHz input in the empty band above 4 kHz). Not checked: model output (needs
 the model weights).
 
-## Other platforms (aarch64)
+## Other platforms (aarch64, Apple silicon)
 
 asrfront's output does not depend on the CPU: the float resampler uses `fmaf()` (correctly
 rounded), every other float operation has a fixed order and no contraction, so x86-64 (avx2,
 generic, scalar kernels) and aarch64 give **bit-identical** `load()` results and features.
-ffmpeg itself does not: its float resampling kernel differs per CPU. Checked with the aarch64
-build of the same ffmpeg 7.0.2 (`imageio-ffmpeg` manylinux2014_aarch64 wheel) and asrfront
-cross-compiled for aarch64 (zig cc, musl), both run under qemu-aarch64 8.2, on 12 files (WAV
-7 formats/rates/layouts, FLAC 2, MP3 3; jfk.wav converted):
+ffmpeg itself does not. Measured with the aarch64 build of the same ffmpeg 7.0.2
+(`imageio-ffmpeg` manylinux2014_aarch64 wheel) under qemu-aarch64 8.2, against asrfront
+cross-compiled for aarch64 (zig cc, musl; bit-identical to the x86-64 build):
 
-| | 16 kHz / u8 / f64 input | resampled WAV / FLAC (float path) | MP3 |
+- **float → s16 rounding**: ffmpeg on aarch64 rounds **half up** (`floor(v + 0.5)`), on x86-64
+  half to even. Exact ties differ by 1 LSB — ~0.06 % of the samples of float32 input, rarer
+  after resampling. This applies wherever ffmpeg converts through float32, including 16 kHz
+  input that is f32, or s32 with more than one channel.
+- **float resampling kernel**: NEON instead of AVX2/FMA3, ≤ 1 LSB.
+- **int16 path** (s16 at 16 kHz, u8) and **double path** (f64): identical to x86-64.
+- **NaN / ±inf / |x| ≥ 65536** float samples: handled differently again (see the out-of-range
+  rules above); not reproduced for aarch64.
+
+Results on 12 converted copies of jfk.wav (WAV 7 formats/rates/layouts, FLAC 2, MP3 3):
+
+| | s16 / u8 at 16 kHz, f64 | float path (resampled, f32, s32 multichannel) | MP3 |
 |---|---|---|---|
 | ffmpeg aarch64 vs. ffmpeg x86-64 (AVX2+FMA3) | identical | ≤ 1 LSB, ~0.02 % of samples | ≤ 1 LSB, ~0.2 % |
 | asrfront (any CPU) vs. ffmpeg aarch64 | identical | ≤ 1 LSB, ~0.02 % | ≤ 1 LSB, ~0.08 % |
 | asrfront (any CPU) vs. ffmpeg x86-64 | identical | identical | ≤ 1 LSB |
 
-Lengths were identical everywhere. So on ARM, asrfront matches whisper's ffmpeg-based loading
-to within 1 LSB — the same amount by which ffmpeg differs between the two architectures. On
-aarch64 `fmaf()` compiles to NEON `fmla` (no libm call). Not measured: speed on real ARM
-hardware (qemu only); the wheels themselves are built with GCC in CI, where the aarch64 test job
-runs the bit-exact C-vs-reference tests natively.
+and the full ffmpeg comparison suite (`test_ffmpeg_ref.py` + `test_load.py`, 576 tests) run
+against the aarch64 ffmpeg passes with the float path allowed 1 LSB (one CPU-specific
+NaN/inf test skipped); int16 and double paths stay exact. Lengths were identical everywhere.
+So on ARM (including Apple silicon), asrfront matches whisper's ffmpeg-based loading to within
+1 LSB — the amount by which ffmpeg differs between the two architectures.
+
+The tests pick the tolerance with `helpers.ffmpeg_is_reference_build()` (x86-64 with AVX2 and
+FMA3 → exact; anything else → 1 LSB on the float path); `ASRFRONT_FFMPEG_EXACT=0/1` overrides
+it. On macOS, imageio-ffmpeg 0.6.0 ships ffmpeg **7.1** instead of 7.0.2 (not checked).
+
+On aarch64 `fmaf()` compiles to NEON `fmla` (no libm call). Not measured: speed on real ARM
+hardware (qemu only). The Linux aarch64 wheels are built with GCC in CI, where the aarch64 test
+job runs the bit-exact C-vs-reference tests natively; macOS is not built or tested in CI.
 
 ## Summary of accuracy targets (M9)
 

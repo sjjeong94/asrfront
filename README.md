@@ -131,6 +131,8 @@ fbank (torchaudio builds its mel banks in float32).
 uv sync                       # create .venv and build the extension (needs a C compiler)
 uv run pytest                 # tests; add --group ref for torch/torchaudio comparisons
 uv run --group ref --group load pytest   # + comparisons against ffmpeg 7.0.2 (imageio-ffmpeg)
+# on aarch64 / Apple silicon ffmpeg's float path differs by 1 LSB from x86, so those
+# comparisons allow 1 LSB there (docs/load.md, "Other platforms")
 uv run cmake -S . -B build/ctest -G Ninja -DASRFRONT_BUILD_TESTS=ON -DASRFRONT_BUILD_BENCH=ON
 uv run cmake --build build/ctest && uv run ctest --test-dir build/ctest
 ```

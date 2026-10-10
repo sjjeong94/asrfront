@@ -19,6 +19,11 @@ import asrfront
 
 import reference as ref
 from audio_signals import DATA_DIR
+from helpers import ffmpeg_is_reference_build
+
+# ffmpeg's float path is CPU dependent (docs/load.md, "Other platforms"): bit-exact comparisons
+# only against ffmpeg on x86-64 with AVX2 + FMA3, otherwise up to 1 LSB.
+FFMPEG_EXACT = ffmpeg_is_reference_build()
 
 
 def write_wav(path: Path, x: np.ndarray, sr: int = 16000) -> Path:
@@ -143,6 +148,16 @@ def _ffmpeg():
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+def assert_ffmpeg_equal(ours: np.ndarray, theirs: np.ndarray) -> None:
+    """Same length; bit-exact against the reference ffmpeg build, else within 1 LSB."""
+    if FFMPEG_EXACT:
+        np.testing.assert_array_equal(ours, theirs)
+        return
+    assert len(ours) == len(theirs), (len(ours), len(theirs))
+    diff = np.abs(ours.astype(np.float64) - theirs) * 32768
+    assert diff.max(initial=0) <= 1, f"max diff {diff.max()} LSB"
+
+
 def whisper_load_audio(path: Path) -> np.ndarray:
     cmd = [
         _ffmpeg(),
@@ -224,7 +239,7 @@ def test_ffmpeg_codecs(tmp_path, codec, ch):
     if codec in ("pcm_alaw", "pcm_mulaw") and ch > 2:
         ch = 2
     path = ffmpeg_write(tmp_path / "a.wav", signal(12000, ch, ch), codec)
-    np.testing.assert_array_equal(asrfront.load(path), whisper_load_audio(path))
+    assert_ffmpeg_equal(asrfront.load(path), whisper_load_audio(path))
 
 
 @pytest.mark.parametrize(
@@ -275,7 +290,7 @@ def test_ffmpeg_layouts(tmp_path, layout, codec):
         expected = whisper_load_audio(path)
     except subprocess.CalledProcessError:
         pytest.skip(f"ffmpeg cannot downmix {layout}")
-    np.testing.assert_array_equal(asrfront.load(path), expected)
+    assert_ffmpeg_equal(asrfront.load(path), expected)
 
 
 def test_ffmpeg_rf64(tmp_path):
@@ -283,7 +298,7 @@ def test_ffmpeg_rf64(tmp_path):
         tmp_path / "a.wav", signal(9000, 2, 1), "pcm_s16le", extra=("-rf64", "always")
     )
     assert path.read_bytes()[:4] == b"RF64"
-    np.testing.assert_array_equal(asrfront.load(path), whisper_load_audio(path))
+    assert_ffmpeg_equal(asrfront.load(path), whisper_load_audio(path))
 
 
 def _patch_data_size(data: bytes, value: int) -> bytes:
@@ -306,7 +321,7 @@ def test_ffmpeg_damaged_files(tmp_path, case):
         data = good + b"LIST\x04\x00\x00\x00abcd"
     path = tmp_path / "d.wav"
     path.write_bytes(data)
-    np.testing.assert_array_equal(asrfront.load(path), whisper_load_audio(path))
+    assert_ffmpeg_equal(asrfront.load(path), whisper_load_audio(path))
 
 
 def _float_wav(path: Path, x: np.ndarray) -> Path:
@@ -326,17 +341,19 @@ def test_ffmpeg_float_specials_f64(tmp_path):
     """f64 out-of-range / non-finite samples: ffmpeg's scalar rule, reproduced exactly."""
     x = np.repeat(np.array(SPECIALS, np.float64), 37)
     path = _float_wav(tmp_path / "s.wav", x)
-    np.testing.assert_array_equal(asrfront.load(path), whisper_load_audio(path))
+    assert_ffmpeg_equal(asrfront.load(path), whisper_load_audio(path))
 
 
 def test_ffmpeg_float_specials_f32(tmp_path):
     """f32: exact while |x| < 65536; beyond that ffmpeg is position-dependent (docs/load.md)."""
+    if not FFMPEG_EXACT:
+        pytest.skip("ffmpeg's handling of NaN / inf / huge floats is CPU specific")
     x = np.repeat(np.array(SPECIALS, np.float32), 37)
     path = _float_wav(tmp_path / "s.wav", x)
     ours, theirs = asrfront.load(path), whisper_load_audio(path)
     with np.errstate(invalid="ignore", over="ignore"):
         wild = ~(np.abs(x.astype(np.float64)) < 65536)
-    np.testing.assert_array_equal(ours[~wild], theirs[~wild])
+    assert_ffmpeg_equal(ours[~wild], theirs[~wild])
     assert np.all(ours[wild] == -1.0)
     scalar_rule = ref.ffmpeg_load_float(x.astype(np.float64), "f64", 16000)
     assert np.all((theirs[wild] == -1.0) | (theirs[wild] == scalar_rule[wild]))
@@ -366,7 +383,7 @@ def test_ffmpeg_mismatched_channel_mask(tmp_path, ch, mask):
     data += b"data" + struct.pack("<I", len(body)) + body
     path = tmp_path / "m.wav"
     path.write_bytes(b"RIFF" + struct.pack("<I", len(data)) + data)
-    np.testing.assert_array_equal(asrfront.load(path), whisper_load_audio(path))
+    assert_ffmpeg_equal(asrfront.load(path), whisper_load_audio(path))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -377,18 +394,6 @@ def test_ffmpeg_mismatched_channel_mask(tmp_path, ch, mask):
 EXACT_LENGTH_RATES = {8000, 11025, 12000, 24000, 32000, 48000, 96000}
 
 
-def _host_has_fma() -> bool:
-    import platform
-
-    if platform.machine().lower() not in ("x86_64", "amd64"):
-        return False
-    try:
-        flags = Path("/proc/cpuinfo").read_text()
-    except OSError:
-        return False
-    return " avx2" in flags and " fma" in flags
-
-
 def assert_matches_ffmpeg(ours: np.ndarray, theirs: np.ndarray, sr: int, tol_lsb: int = 0) -> None:
     """Same samples (to tol_lsb); length exact or (for some rates) the last sample may differ."""
     if sr in EXACT_LENGTH_RATES:
@@ -396,8 +401,8 @@ def assert_matches_ffmpeg(ours: np.ndarray, theirs: np.ndarray, sr: int, tol_lsb
     else:
         assert abs(len(ours) - len(theirs)) <= 1, (len(ours), len(theirs))
     n = min(len(ours), len(theirs))
-    if not _host_has_fma():
-        tol_lsb = max(tol_lsb, 1)  # ffmpeg's own float kernel differs without FMA3
+    if not FFMPEG_EXACT:
+        tol_lsb = max(tol_lsb, 1)  # ffmpeg's own float kernel differs on other CPUs
     diff = np.abs(ours[:n].astype(np.float64) - theirs[:n]) * 32768
     assert diff.max(initial=0) <= tol_lsb, f"max diff {diff.max()} LSB, {np.sum(diff > 0)} differ"
 
@@ -480,7 +485,7 @@ def test_ffmpeg_flac(tmp_path, fmt, ch, sr):
 def test_ffmpeg_flac_layouts(tmp_path, layout):
     n_ch = {"2.1": 3, "3.0": 3, "quad(side)": 4, "5.0(side)": 5, "5.1(side)": 6}[layout]
     path = ffmpeg_write(tmp_path / "a.flac", signal(8000, n_ch, n_ch), "flac", layout=layout)
-    np.testing.assert_array_equal(asrfront.load(path), whisper_load_audio(path))
+    assert_ffmpeg_equal(asrfront.load(path), whisper_load_audio(path))
 
 
 MP3_MODES = {
