@@ -1,0 +1,249 @@
+# asrfront Implementation Plan
+
+## 0. Goals and Scope
+
+Implement input feature extraction for ASR models (Whisper, SenseVoiceSmall) in **dependency-free native C**, and expose it through a **nanobind**-based Python binding.
+
+```python
+import asrfront
+
+mel  = asrfront.whisper.log_mel(audio)    # (80, 3000) float32
+feat = asrfront.sensevoice.fbank(audio)   # (T', 560)  float32
+```
+
+**Success criteria**
+1. **Accuracy** — difference from the reference implementations:
+   - Whisper: max abs err < 1e-4 vs. `openai-whisper`'s `log_mel_spectrogram(pad_or_trim(audio))`
+   - SenseVoice: max abs err < 1e-3 (log domain) vs. FunASR `WavFrontend` (= `torchaudio.compliance.kaldi.fbank` + LFR + CMVN)
+2. **Speed**: for 30 s of audio, single-threaded, at least 5x faster than the torch (CPU) implementation and at least 10x faster than librosa
+3. **Dependencies**: the C core links against nothing beyond libc/libm (FFT implemented in-house)
+
+**Out of scope (v1)**: resampling (input is assumed to be 16 kHz mono), audio file decoding, GPU, streaming (to be considered later).
+
+---
+
+## 1. Reference Algorithm Specification
+
+Pin down the reference behavior exactly before implementing. A single deviation here will make the numbers diverge.
+
+### 1.1 Whisper `log_mel`
+
+| Item | Value |
+|---|---|
+| sample rate | 16000 |
+| input length | `pad_or_trim` → 480000 samples (30 s); zero-padded if shorter, truncated if longer |
+| n_fft / win_length | 400 |
+| hop_length | 160 |
+| window | Hann, **periodic** (`torch.hann_window(400)`): `0.5 - 0.5*cos(2πn/400)` |
+| center | True, **reflect** padding of 200 samples on each side |
+| frame count | 3001 → drop last frame → **3000** |
+| spectrum | `|STFT|²` (power), bins 0..200 (201 bins) |
+| mel filter | librosa `filters.mel(sr=16000, n_fft=400, n_mels=80/128)` (slaney mel scale, slaney norm, fmin=0, fmax=8000) |
+| log | `log10(max(mel, 1e-10))` |
+| dynamic range | `x = max(x, global_max(x) - 8.0)` ← **max over the whole spectrogram** |
+| normalization | `(x + 4.0) / 4.0` |
+| output | `(n_mels, 3000)` float32, row-major |
+
+- Also support `n_mels=128` (large-v3).
+- Option: with `pad_or_trim=False`, accept arbitrary-length input → `(n_mels, N/160)` output (matching whisper's `padding` argument behavior).
+- Generate the mel filters directly in C in float64, cast to float32, and compare bit-for-bit against whisper's shipped `mel_filters.npz`. (Fallback if they differ: embed the npz values as a C array.)
+
+### 1.2 SenseVoiceSmall `fbank` (FunASR `WavFrontend`)
+
+| Item | Value |
+|---|---|
+| input scale | float waveform × 32768 (FunASR does `waveform * (1 << 15)`) |
+| frame_length / shift | 25 ms (400) / 10 ms (160) |
+| snip_edges | True → `T = 1 + (N - 400) // 160` |
+| dither | 0.0 (inference default; exposed as an option, with an in-house seedable RNG for reproducibility) |
+| remove_dc_offset | True (subtract per-frame mean) |
+| preemphasis | 0.97 (`x[i] -= 0.97*x[i-1]`, `x[0] -= 0.97*x[0]`) |
+| window | Hamming (kaldi, **symmetric**): `0.54 - 0.46*cos(2πn/(N-1))` |
+| FFT size | round_to_power_of_two → **512** (400 + zero padding) |
+| spectrum | power, bins 0..256 (257 bins) |
+| mel | Kaldi mel (`1127*ln(1+f/700)`), 80 bins, low_freq=20, high_freq=8000, triangular filters, **no normalization** |
+| log | `log(max(mel, FLT_EPSILON))` (natural log) |
+| use_energy | False |
+| LFR | lfr_m=7, lfr_n=6. Prepend `(m-1)//2 = 3` copies of the first frame, `T' = ceil(T / 6)`, each output concatenates 7 frames → 560 dims. Pad the tail with the last frame if short |
+| CMVN | `(x + shift) * scale` using the `<AddShift>` / `<Rescale>` vectors (560 dims) from `am.mvn` (Kaldi nnet text format) |
+| output | `(T', 560)` float32 |
+
+- CMVN vectors are either parsed from `am.mvn` on the Python side and passed in (`asrfront.sensevoice.load_cmvn(path)`), or CMVN can be skipped via an option.
+- Expose per-stage outputs (raw fbank `(T, 80)`, before/after LFR) as separate functions for debugging and testing.
+
+---
+
+## 2. Architecture
+
+```
+asrfront/
+├── CMakeLists.txt
+├── pyproject.toml              # scikit-build-core + nanobind
+├── README.md / plan.md
+├── csrc/                       # pure C11, no external dependencies
+│   ├── include/asrfront.h      # public C API
+│   ├── fft.c / fft.h           # real FFT (n=400 mixed-radix, n=512 radix-2/4)
+│   ├── window.c                # hann (periodic), hamming (symmetric)
+│   ├── melbank.c               # slaney / kaldi mel filter generation (sparse form)
+│   ├── whisper.c               # log_mel pipeline
+│   ├── kaldi_fbank.c           # kaldi-compatible fbank
+│   ├── lfr_cmvn.c              # LFR + CMVN
+│   ├── threadpool.c            # (optional) pthread-based frame parallelism
+│   └── simd.h                  # SSE/AVX2/NEON helpers + scalar fallback
+├── src/asrfront/
+│   ├── __init__.py             # exposes whisper, sensevoice submodules
+│   ├── _ext.cpp                # nanobind binding (the only C++ file)
+│   ├── whisper.py / sensevoice.py   # thin Python wrappers, cmvn parser
+│   └── py.typed, *.pyi
+├── tests/
+│   ├── c/                      # C unit tests (FFT accuracy etc., plain asserts, no framework)
+│   └── python/                 # pytest: accuracy vs. references
+└── bench/                      # speed benchmark scripts
+```
+
+### 2.1 C API (`asrfront.h`)
+
+Create an **opaque handle** holding state (plans/filterbanks/windows/scratch buffers) once and reuse it. No malloc on the hot path.
+
+```c
+typedef struct af_whisper af_whisper;
+typedef struct af_whisper_config {
+    int n_mels;          /* 80 | 128 */
+    int pad_or_trim;     /* 1: fixed 30 s */
+    int n_threads;       /* 0: auto, 1: single */
+} af_whisper_config;
+
+int  af_whisper_create(const af_whisper_config *cfg, af_whisper **out);
+/* query output size, caller allocates the buffer */
+size_t af_whisper_out_frames(const af_whisper *h, size_t n_samples);
+int  af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, float *out);
+void af_whisper_destroy(af_whisper *h);
+
+typedef struct af_sensevoice af_sensevoice;
+typedef struct af_sensevoice_config {
+    int   n_mels;              /* 80 */
+    int   lfr_m, lfr_n;        /* 7, 6 */
+    float dither;              /* 0 */
+    unsigned long long seed;
+    const float *cmvn_shift;   /* NULL skips CMVN; length n_mels*lfr_m */
+    const float *cmvn_scale;
+    int   n_threads;
+} af_sensevoice_config;
+
+int  af_sensevoice_create(const af_sensevoice_config *cfg, af_sensevoice **out);
+size_t af_sensevoice_raw_frames(const af_sensevoice *h, size_t n_samples); /* T  */
+size_t af_sensevoice_out_frames(const af_sensevoice *h, size_t n_samples); /* T' */
+size_t af_sensevoice_feat_dim(const af_sensevoice *h);                     /* 560 */
+int  af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, float *out);
+int  af_sensevoice_fbank_raw(af_sensevoice *h, const float *audio, size_t n_samples, float *out); /* (T,80) */
+void af_sensevoice_destroy(af_sensevoice *h);
+```
+
+- Return value: 0 on success / negative error code (`AF_EINVAL`, `AF_ENOMEM`, `AF_ENOTIMPL`). `*_create` returns the handle through an out-parameter so EINVAL and ENOMEM can be told apart.
+- Handles are not thread-safe (they own scratch buffers). For multithreaded use, one handle per thread — handled on the Python side with a thread-local cache.
+
+### 2.2 Python Binding (nanobind)
+
+- Input: `nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::device::cpu>`. float64/int16/non-contiguous arrays are converted in the Python wrapper via `np.ascontiguousarray(..., dtype=np.float32)` (int16 divided by 32768).
+- Output: numpy array that takes ownership of the C-allocated buffer via `nb::capsule` (no copy).
+- Release the GIL during computation with `nb::gil_scoped_release` → enables parallel processing from Python threads.
+- Default-config handles are lazily created and cached at module level (`functools.lru_cache` keyed on n_mels etc.).
+- Batch API: `log_mel_batch(list_of_audio, n_threads=...)` → `(B, 80, 3000)`. Batch-level parallelism is more efficient than frame-level parallelism, so include it in v1.
+- `torch.Tensor` input is accepted automatically by nanobind via DLPack (CPU only).
+
+---
+
+## 3. Performance Design
+
+30 s of audio = 3000 frames × (FFT + mel product). Bottlenecks, in order:
+
+1. **FFT**
+   - Whisper n=400 = 2⁴·5² → implement a **mixed-radix (2, 4, 5) real FFT** in-house. Use the real-input trick (N/2 complex FFT + post-processing) for a 2x saving.
+   - Kaldi n=512 → split-radix / radix-4 real FFT.
+   - Twiddle tables precomputed at handle creation. Internal arithmetic in float32; twiddles generated in double and stored as float.
+   - Alternative to evaluate: run FFTs on multiple frames simultaneously across SIMD lanes (structure-of-arrays, 8 frames per AVX2 vector) — lane utilization is high given the many frames. Decide by benchmark after the first implementation.
+2. **Mel filter product**
+   - Mel filters are very sparse (each spans a few to a few dozen bins). Store as sparse **(start, len, weights)** → ~10x fewer ops than a dense GEMM (80×201).
+   - Or process in frame blocks (e.g. 16 frames) for cache friendliness.
+3. **log**
+   - `log10f`/`logf` called 3000×80 = 240k times → not negligible, so add an optional SIMD polynomial log approximation (~1 ulp accuracy). Default to libm for accuracy; decide after benchmarking.
+4. **Memory**
+   - Do not materialize the full STFT matrix; **stream per frame**: frame → FFT → power → mel → log, written straight to the output buffer. Whisper's global max is accumulated as a running max during mel computation, then clamp/normalize in one final pass.
+   - Output layout: Whisper is `(n_mels, T)`, so compute in frame blocks and write transposed (cache-aware).
+5. **SIMD**
+   - Rely on compiler auto-vectorization first (`-O3`, but **no `-ffast-math`** — it breaks numerical reproducibility; use `restrict` and aligned buffers instead).
+   - Hot loops get x86 SSE2/AVX2/AVX-512 and ARM NEON intrinsic paths plus a scalar fallback. Runtime dispatch (`__builtin_cpu_supports`) lets a single wheel support many CPUs.
+6. **Threading**
+   - Split frame ranges into n chunks processed by pthread workers (Win32 threads on Windows). For a single 30 s input, measure gain vs. overhead before choosing the default (expected: 1 thread by default, threads used in the batch API).
+
+---
+
+## 4. Implementation Milestones
+
+### M1. Project skeleton (0.5 day) — done
+- [x] `pyproject.toml` (scikit-build-core, nanobind), `CMakeLists.txt` (C11 static lib `asrfront_core` + nanobind module `_ext`)
+- [x] Verify `import asrfront` works with stub functions; uv-based dev loop (`uv sync`, `uv run pytest`; native rebuild via `tool.uv.cache-keys`)
+- [x] ruff/clang-format configuration
+
+### M2. Pin references & test harness (1 day)
+- [ ] `tests/python/reference.py`: openai-whisper (or the same logic reimplemented in numpy/torch), torchaudio kaldi fbank + FunASR LFR/CMVN reference
+- [ ] Test audio: silence, sine waves, white noise, real speech, short input (< 400 samples), input longer than 30 s, clipped signals
+- [ ] Split the reference into stages too, so intermediate values (window, mel filter, power spectrum) can be compared
+
+### M3. FFT (2 days)
+- [ ] Scalar mixed-radix complex FFT → real FFT wrapper
+- [ ] Verify relative error < 1e-6 vs. naive DFT (double) for n=400, 512 (C tests)
+- [ ] Benchmark: ns per frame
+
+### M4. Whisper log_mel (2 days)
+- [ ] Periodic Hann, reflect pad, frame loop, power, slaney mel (80/128) generation + npz comparison
+- [ ] log10 / clamp / global max / normalization
+- [ ] pad_or_trim on/off; accuracy tests pass
+
+### M5. SenseVoice fbank (2 days)
+- [ ] Kaldi framing (snip_edges), DC removal, preemphasis, hamming, 512 FFT, kaldi mel, log
+- [ ] Compare `af_sensevoice_fbank_raw` against torchaudio kaldi.fbank
+- [ ] LFR, CMVN, `am.mvn` parser (Python); compare final output against FunASR
+- [ ] Dither option (xorshift RNG + Box–Muller), dither=0 by default
+
+### M6. Polish Python API (1 day)
+- [ ] dtype/shape validation with helpful error messages; int16/float64 input handling
+- [ ] GIL release, zero-copy output, `.pyi` type stubs, docstrings
+- [ ] Batch API
+
+### M7. Optimization (3 days)
+- [ ] Benchmark scripts (`bench/`): asrfront vs. whisper (torch CPU), librosa, torchaudio kaldi, kaldi-native-fbank, FunASR
+- [ ] Sparse mel, SIMD FFT/power/mel, runtime dispatch
+- [ ] Profile (perf) and iterate on bottlenecks, rerunning accuracy tests at every step
+- [ ] Threading and batch parallelism
+
+### M8. Packaging & CI (1 day)
+- [ ] GitHub Actions: build & test on Linux (x86_64/aarch64), macOS (arm64/x86_64), Windows
+- [ ] Build wheels with cibuildwheel; use nanobind stable ABI (`abi3`, Python ≥ 3.12) to minimize wheel count
+- [ ] Add install instructions, benchmark results and accuracy table to README
+
+**Total estimate: ~12–13 working days**
+
+---
+
+## 5. Test Strategy
+
+| Level | Contents |
+|---|---|
+| C unit | FFT vs. naive DFT, window values, mel filter sums/shapes, edge cases (n_samples=0, < frame_length) |
+| Python accuracy | max abs / mean abs error vs. references across audio types and lengths (parametrized) |
+| Regression | Output hashes/snapshots for fixed inputs (detects SIMD path changes) |
+| Path consistency | Scalar vs. SIMD path output comparison (dispatch forced via environment variable) |
+| Memory | Run C tests + pytest under an ASan/UBSan build (one CI job) |
+| Threads | Identical results when called concurrently from multiple Python threads |
+
+---
+
+## 6. Risks & Open Decisions
+
+1. **Whisper accuracy vs. speed**: torch uses float32 FFT (pocketfft/MKL), so differences around 1e-5 are unavoidable. Set tolerance to 1e-4 and run one end-to-end check that actual model output (decoded text) is identical.
+2. **Global max dependency**: Whisper normalization depends on the max over the whole spectrogram → results change under streaming/chunked processing. v1 supports whole-input processing only.
+3. **SenseVoice CMVN source**: `am.mvn` may differ per model, so instead of bundling it, accept a path/array as input. (Whether to bundle SenseVoiceSmall defaults for convenience is decided after checking the license.)
+4. **Input scale**: SenseVoice expects int16 scale (×32768). To avoid confusion when users pass floats already in int16 scale, make the `input_scale` argument explicit or document dtype-based automatic handling.
+5. **No `-ffast-math`**: avoided for reproducibility. Whether FMA is used (and resulting per-path differences) is also managed through tests.
+6. **Follow-up candidates**: streaming kaldi fbank (easy for SenseVoice since frames are independent), resampler, presets for additional models (Paraformer, other Whisper-style models, Qwen-Audio, etc.).

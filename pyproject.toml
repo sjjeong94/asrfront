@@ -1,0 +1,47 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "asrfront"
+version = "0.1.0"
+description = "Super-fast, dependency-free C frontends (log-mel, kaldi fbank) for Whisper and SenseVoice ASR models"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["numpy>=1.21"]
+
+[dependency-groups]
+dev = [
+    "cmake>=4.4.4",
+    "ninja>=1.13.2",
+    "pytest>=7",
+    "ruff>=0.6",
+]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+cmake.build-type = "Release"
+wheel.packages = ["src/asrfront"]
+
+[tool.uv]
+# Managed CPython ships headers (Python.h), which the system python3 lacks.
+python-preference = "managed"
+# Rebuild the native extension on `uv sync` / `uv run` when C/C++ sources change.
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "CMakeLists.txt" },
+  { file = "csrc/**/*.c" },
+  { file = "csrc/**/*.h" },
+  { file = "src/asrfront/_ext.cpp" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "NPY"]
