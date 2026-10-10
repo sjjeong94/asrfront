@@ -17,6 +17,11 @@ dev = [
     "pytest>=7",
     "ruff>=0.6",
 ]
+ref = [
+    "soundfile>=0.13.1",
+    "torch>=2.8.0",
+    "torchaudio>=2.8.0",
+]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"
@@ -25,6 +30,9 @@ cmake.build-type = "Release"
 wheel.packages = ["src/asrfront"]
 
 [tool.uv]
+# `ref` holds the heavyweight reference implementations (torch, torchaudio) used only to
+# validate tests/python/reference.py; opt in with `uv sync --group ref`.
+default-groups = ["dev"]
 # Managed CPython ships headers (Python.h), which the system python3 lacks.
 python-preference = "managed"
 # Rebuild the native extension on `uv sync` / `uv run` when C/C++ sources change.
@@ -45,3 +53,16 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "NPY"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["asrfront"]
+known-local-folder = ["audio_signals", "helpers", "reference"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }

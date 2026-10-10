@@ -33,13 +33,3 @@ def test_sensevoice_cmvn_length_checked():
 def test_input_validation():
     with pytest.raises(ValueError):
         asrfront.whisper.log_mel(np.zeros((2, 16000), np.float32))
-
-
-@pytest.mark.parametrize(
-    "fn",
-    [asrfront.whisper.log_mel, asrfront.sensevoice.fbank, asrfront.sensevoice.fbank_raw],
-)
-def test_compute_not_implemented_yet(fn):
-    # M1 skeleton: compute paths are stubs. Remove once M4/M5 land.
-    with pytest.raises(NotImplementedError):
-        fn(np.zeros(16000, np.float32))

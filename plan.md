@@ -185,10 +185,20 @@ void af_sensevoice_destroy(af_sensevoice *h);
 - [x] Verify `import asrfront` works with stub functions; uv-based dev loop (`uv sync`, `uv run pytest`; native rebuild via `tool.uv.cache-keys`)
 - [x] ruff/clang-format configuration
 
-### M2. Pin references & test harness (1 day)
-- [ ] `tests/python/reference.py`: openai-whisper (or the same logic reimplemented in numpy/torch), torchaudio kaldi fbank + FunASR LFR/CMVN reference
-- [ ] Test audio: silence, sine waves, white noise, real speech, short input (< 400 samples), input longer than 30 s, clipped signals
-- [ ] Split the reference into stages too, so intermediate values (window, mel filter, power spectrum) can be compared
+### M2. Pin references & test harness (1 day) — done
+- [x] `tests/python/reference.py`: float64 numpy ports of whisper `log_mel_spectrogram` (+ librosa slaney filters), `torchaudio.compliance.kaldi.fbank`, FunASR `apply_lfr` / `apply_cmvn` / `load_cmvn`
+- [x] Test audio (`tests/python/audio_signals.py`): silence, sine, multi-tone, chirp, white noise, near-silent, impulses, clipped, DC offset, real speech (`tests/data/jfk.wav`), 35 s speech, short inputs (201/399/400/1000 samples), odd length
+- [x] Split the reference into stages too, so intermediate values (window, mel filter, power spectrum) can be compared
+- [x] `test_reference.py` validates the reference against the originals (`uv sync --group ref` installs CPU torch/torchaudio; skipped otherwise):
+  - slaney filters == whisper `mel_filters.npz` (80/128) to float32 rounding
+  - whisper: ≤ 1e-4 vs. torch port of `log_mel_spectrogram` on all signals, 80/128 mels, pad_or_trim on/off
+  - kaldi: ≤ 1e-6 vs. torchaudio when given torchaudio's filter bank and float64 input (exact port); ≤ 2e-3 end to end vs. FunASR's float32 call
+  - C frame-count helpers == reference output shapes
+- [x] `test_whisper.py` / `test_sensevoice.py`: C vs. reference, marked `xfail(strict, NotImplementedError)` until M4/M5
+
+**Findings**
+- torchaudio builds the kaldi mel banks in float32 (errors up to ~1.4e-5), and with its float32 FFT this gives up to ~1.3e-3 log-domain error on low-energy bins (worst case: chirp). Accuracy targets for asrfront are therefore measured **against the float64 reference** (Whisper 1e-4, SenseVoice 1e-3); agreement with torchaudio is only expected to ~2e-3.
+- Whisper with `pad_or_trim=False` and ≤ 200 samples is an error in torch (reflect pad); asrfront's behavior for this case is decided in M4.
 
 ### M3. FFT (2 days)
 - [ ] Scalar mixed-radix complex FFT → real FFT wrapper
