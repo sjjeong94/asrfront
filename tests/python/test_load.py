@@ -454,3 +454,113 @@ def test_ffmpeg_speech_resampled(tmp_path, sr, ch, codec):
         check=True,
     )
     assert_matches_ffmpeg(asrfront.load(path), whisper_load_audio(path), sr)
+
+
+# ---------------------------------------------------------------------------------------------
+# FLAC and MP3 (M9.4), against ffmpeg
+# ---------------------------------------------------------------------------------------------
+
+FLAC_FMTS = {
+    "s16": ("-sample_fmt", "s16"),
+    "s24": ("-sample_fmt", "s32", "-bits_per_raw_sample", "24"),
+}
+
+
+@pytest.mark.parametrize("sr", [8000, 16000, 22050, 44100, 48000, 96000])
+@pytest.mark.parametrize("ch", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("fmt", ["s16", "s24"])
+def test_ffmpeg_flac(tmp_path, fmt, ch, sr):
+    """FLAC is lossless: bit-exact (sample-wise and, for most rates, in length)."""
+    x = signal(sr // 3 + 5, ch, ch * 10 + sr)
+    path = ffmpeg_write(tmp_path / "a.flac", x, "flac", extra=FLAC_FMTS[fmt], sr=sr)
+    assert_matches_ffmpeg(asrfront.load(path), whisper_load_audio(path), sr)
+
+
+@pytest.mark.parametrize("layout", ["2.1", "3.0", "quad(side)", "5.0(side)", "5.1(side)"])
+def test_ffmpeg_flac_layouts(tmp_path, layout):
+    n_ch = {"2.1": 3, "3.0": 3, "quad(side)": 4, "5.0(side)": 5, "5.1(side)": 6}[layout]
+    path = ffmpeg_write(tmp_path / "a.flac", signal(8000, n_ch, n_ch), "flac", layout=layout)
+    np.testing.assert_array_equal(asrfront.load(path), whisper_load_audio(path))
+
+
+MP3_MODES = {
+    "cbr": ("-b:a", "128k"),
+    "vbr": ("-q:a", "2"),
+    "cbr_no_xing": ("-b:a", "64k", "-write_xing", "0"),
+    "id3v1": ("-b:a", "96k", "-write_id3v1", "1"),
+    "no_id3": ("-b:a", "96k", "-id3v2_version", "0"),
+}
+
+
+def assert_mp3_close(ours: np.ndarray, theirs: np.ndarray) -> None:
+    """Different decoders (dr_mp3 vs. ffmpeg's mp3float): same length and alignment, <= 1 LSB."""
+    assert len(ours) == len(theirs)
+    diff = np.abs(ours.astype(np.float64) - theirs) * 32768
+    assert diff.max(initial=0) <= 1, f"max diff {diff.max()} LSB"
+    assert np.mean(diff > 0) < 0.05
+
+
+@pytest.mark.parametrize("sr", [8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000])
+@pytest.mark.parametrize("ch", [1, 2])
+@pytest.mark.parametrize("mode", list(MP3_MODES))
+def test_ffmpeg_mp3(tmp_path, mode, ch, sr):
+    x = signal(sr * 3 // 4, ch, ch + sr)
+    path = ffmpeg_write(tmp_path / "a.mp3", x, "libmp3lame", extra=MP3_MODES[mode], sr=sr)
+    assert_mp3_close(asrfront.load(path), whisper_load_audio(path))
+
+
+@pytest.mark.parametrize("codec,ext", [("libmp3lame", "mp3"), ("flac", "flac")])
+def test_ffmpeg_speech_compressed(tmp_path, codec, ext):
+    """11 s of real speech at 44.1 kHz stereo."""
+    path = tmp_path / f"speech.{ext}"
+    subprocess.run(
+        [
+            _ffmpeg(),
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            str(DATA_DIR / "jfk.wav"),
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-acodec",
+            codec,
+            str(path),
+        ],
+        check=True,
+    )
+    ours, theirs = asrfront.load(path), whisper_load_audio(path)
+    if ext == "flac":
+        assert_matches_ffmpeg(ours, theirs, 44100)
+    else:
+        assert abs(len(ours) - len(theirs)) <= 1
+        n = min(len(ours), len(theirs))
+        assert np.abs(ours[:n] - theirs[:n]).max() * 32768 <= 1
+
+
+@pytest.mark.parametrize("ext", ["flac", "mp3"])
+def test_compressed_bytes_and_misnamed(tmp_path, ext):
+    """Detection is by content: bytes input and a wrong file extension both work."""
+    codec = {"flac": "flac", "mp3": "libmp3lame"}[ext]
+    path = ffmpeg_write(tmp_path / f"a.{ext}", signal(16000, 2, 0), codec, sr=44100)
+    expected = asrfront.load(path)
+    np.testing.assert_array_equal(asrfront.load(path.read_bytes()), expected)
+    other = tmp_path / "audio.wav"
+    other.write_bytes(path.read_bytes())
+    np.testing.assert_array_equal(asrfront.load(other), expected)
+
+
+@pytest.mark.parametrize("ext", ["flac", "mp3"])
+def test_truncated_compressed(tmp_path, ext):
+    """Truncated files decode a prefix (or fail cleanly) instead of crashing."""
+    codec = {"flac": "flac", "mp3": "libmp3lame"}[ext]
+    data = ffmpeg_write(tmp_path / f"a.{ext}", signal(32000, 2, 1), codec, sr=32000).read_bytes()
+    full = len(asrfront.load(data))
+    for cut in [10, 100, 1000, len(data) // 3, len(data) // 2, len(data) - 7]:
+        try:
+            y = asrfront.load(data[:cut])
+        except ValueError:
+            continue
+        assert len(y) <= full and np.all(np.isfinite(y))

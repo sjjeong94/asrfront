@@ -13,7 +13,7 @@ SAMPLE_RATE = 16000
 
 _RAW_AUTO, _RAW_NEVER, _RAW_FORCE = 0, 1, 2
 _RAW_EXTENSIONS = (".pcm", ".raw")
-_SUPPORTED = "WAV, or raw PCM (s16le, 16 kHz, mono)"
+_SUPPORTED = "WAV, FLAC, MP3, or raw PCM (s16le, 16 kHz, mono)"
 
 Source = Union[str, "os.PathLike[str]", bytes, bytearray, memoryview, np.ndarray]
 
@@ -23,13 +23,15 @@ def load(source: Source) -> np.ndarray:
 
     Args:
         source: a file path, or the file's contents as bytes (``bytes``, ``bytearray``,
-            ``memoryview`` or a 1-D uint8 array). Supported: WAV, and raw PCM (s16le,
-            16 kHz, mono) given as a ``.pcm`` / ``.raw`` path or as bytes without a recognized
-            container header.
+            ``memoryview`` or a 1-D uint8 array). Supported: WAV, FLAC, MP3, and raw PCM
+            (s16le, 16 kHz, mono) given as a ``.pcm`` / ``.raw`` path or as bytes without a
+            recognized container header. The format is detected from the content.
 
     Returns:
-        1-D float32 array, 16 kHz mono, identical to ``whisper.load_audio(path)``
-        (ffmpeg's decoding and downmix, rounded through int16).
+        1-D float32 array, 16 kHz mono, matching ``whisper.load_audio(path)`` (ffmpeg's
+        decoding, resampling and downmix, rounded through int16): bit-exact for WAV / FLAC /
+        PCM at common sample rates, within 1/32768 for MP3 (different decoder). See
+        docs/load.md for the details.
     """
     if isinstance(source, (str, os.PathLike)):
         path = os.fspath(source)

@@ -56,12 +56,28 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$")
   set(ASRFRONT_HAVE_AVX2 ON)
 endif()
 
+# Vendored FLAC / MP3 decoders (csrc/third_party/README.md): own target, no extra warnings.
+set(ASRFRONT_DRLIBS_DEFS DR_FLAC_NO_STDIO DR_FLAC_NO_OGG DR_MP3_NO_STDIO DR_MP3_FLOAT_OUTPUT)
+add_library(asrfront_drlibs OBJECT csrc/third_party/dr_libs.c)
+target_compile_definitions(asrfront_drlibs PRIVATE ${ASRFRONT_DRLIBS_DEFS})
+set_target_properties(asrfront_drlibs PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(MSVC)
+  target_compile_options(asrfront_drlibs PRIVATE /W0)
+else()
+  # Corrupt FLAC data overflows int32 sample arithmetic in dr_flac: make it defined
+  # (wraparound -> noise) instead of undefined behavior.
+  target_compile_options(asrfront_drlibs PRIVATE -w -fwrapv)
+endif()
+list(APPEND ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_drlibs>)
+
 add_library(asrfront_core STATIC
   csrc/audio_load.c
   csrc/common.c
   csrc/fft.c
+  csrc/flac.c
   csrc/kernels.c
   csrc/melbank.c
+  csrc/mp3.c
   csrc/remix.c
   csrc/resample.c
   csrc/wav.c
@@ -70,6 +86,8 @@ add_library(asrfront_core STATIC
   ${ASRFRONT_KERNEL_OBJECTS}
 )
 asrfront_c_options(asrfront_core)
+target_compile_definitions(asrfront_core PRIVATE ${ASRFRONT_DRLIBS_DEFS})
+target_include_directories(asrfront_core PRIVATE csrc/third_party)
 if(ASRFRONT_HAVE_AVX2)
   target_compile_definitions(asrfront_core PRIVATE AF_HAVE_AVX2=1)
 endif()

@@ -290,7 +290,7 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 
 **Total estimate: ~12–13 working days** (all milestones implemented; first GitHub CI run pending)
 
-### M9. Audio loading (~6.5 days) — in progress (M9.1–M9.3 done)
+### M9. Audio loading (~6.5 days) — in progress (M9.1–M9.4 done)
 - WAV / raw PCM / FLAC / MP3 → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
 
 ---
@@ -497,6 +497,24 @@ still give bit-identical results; the scalar fallback is slower on CPUs without 
   calls libm `fmaf` per tap. Fix in M9.5: AVX2+FMA3 kernel variant (dispatch must also check
   FMA3), 8-tap vectorized dot products.
 
+#### 7.2.5 M9.4 results
+
+- Vendored dr_flac / dr_mp3 at dr_libs `dfe8377` (newer than the last releases for their
+  Xing/metadata overflow fixes; `csrc/third_party/README.md`), compiled as a separate object
+  library without warnings, with `DR_*_NO_STDIO`, `DR_FLAC_NO_OGG`, `DR_MP3_FLOAT_OUTPUT` and
+  `-fwrapv`. One local patch in dr_flac (signed shifts, found by UBSan).
+- `csrc/flac.c`: s16 for ≤ 16-bit, s32 otherwise; FLAC layouts + ffmpeg's
+  `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` Vorbis comment. `csrc/mp3.c`: unclipped float output,
+  gapless trimming from the LAME header (done by dr_mp3).
+- Findings: dr_mp3's default output is s16-based and **clipped** → thousands of LSB off after
+  resampling; float output fixes it (decoder difference ≤ 5e-6 → ≤ 1 LSB). ffmpeg stores
+  non-FLAC layouts in a Vorbis comment (3-/4-channel files failed until it was parsed).
+- Tests (`test_load.py`, +191): FLAC s16/s24 × 1–8 channels × 6 rates and 5 layouts —
+  **bit-exact**; MP3 CBR/VBR/no-Xing/ID3v1/no-ID3 × mono/stereo × 8 rates — **≤ 1 LSB, same
+  length**; speech at 44.1 kHz stereo; bytes input and misnamed files (content detection);
+  truncated files. ASan/UBSan: 2·10⁵ mutated FLAC/MP3 files.
+- MP3 accuracy is much better than the planned 1e-3 target (≤ 1 LSB ≈ 3e-5).
+
 ### 7.3 C design
 
 New files:
@@ -629,7 +647,7 @@ def load(source: str | os.PathLike[str] | bytes | bytearray | memoryview) -> np.
 | M9.1 ✅ | Pin ffmpeg behavior per §7.2.1: probe-signal experiments first, swr source only for unexplained gaps (behavior notes only); write the `docs/load.md` spec; then write `ffmpeg_resample_ref` (Python) **from the spec** and confirm downmix/resample/rounding/length rules bit-exact vs. ffmpeg | 1.5 d |
 | M9.2 ✅ | WAV + raw PCM parser, downmix, s16 rounding, `af_load_memory/file` + format detection rules, Python `load(path | bytes)` (no resampling yet: non-16 kHz → `AF_EUNSUPPORTED` temporarily) | 1 d |
 | M9.3 ✅ | Resampler **from `docs/load.md` + DSP literature only, swr source not consulted** (§7.2.1): s16 integer path + float path, exact length/delay handling; internal only (one-shot) | 1.5 d |
-| M9.4 | FLAC (dr_flac) + MP3 (dr_mp3, gapless trim) integration, strict MP3 sniffing | 1 d |
+| M9.4 ✅ | FLAC (dr_flac) + MP3 (dr_mp3, gapless trim) integration, strict MP3 sniffing | 1 d |
 | M9.5 | SIMD resampler kernels, benchmark vs. `whisper.load_audio` (ffmpeg subprocess) / `librosa.load`, end-to-end SenseVoice check, ASan + fuzz, README/docs, wheel size check | 1.5 d |
 
 **Total ~6.5 days.**

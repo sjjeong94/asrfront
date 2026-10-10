@@ -59,6 +59,8 @@ int af_mask_layout(uint32_t mask, int channels, uint32_t *layout);
 /* Container decoders. On success *out owns its samples. */
 int af_wav_decode(const uint8_t *buf, size_t size, af_decoded *out);
 int af_pcm_decode_raw(const uint8_t *buf, size_t size, af_decoded *out); /* s16le 16k mono */
+int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out);
+int af_mp3_decode(const uint8_t *buf, size_t size, af_decoded *out);
 
 /* Mono downmix weights (normalized when their sum exceeds 1). */
 void af_downmix_weights(const uint32_t *layout, int channels, double *w);

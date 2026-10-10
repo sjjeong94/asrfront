@@ -86,8 +86,11 @@ int af_load_memory(const void *buf_, size_t size, af_raw_mode raw, float **out, 
         rc = af_wav_decode(buf, size, &d);
         break;
     case FMT_FLAC:
+        rc = af_flac_decode(buf, size, &d);
+        break;
     case FMT_MP3:
-        return AF_EUNSUPPORTED; /* M9.4 */
+        rc = af_mp3_decode(buf, size, &d);
+        break;
     default:
         if (raw == AF_RAW_NEVER)
             return AF_EUNSUPPORTED;

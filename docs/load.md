@@ -215,6 +215,27 @@ input samples give **no output at all**); asrfront applies the formula (deviatio
   are channels, otherwise (no mask, mask with too few / too many / unknown positions) the
   default layout for the channel count. Up to 18 channels with a mask, 8 without.
 
+### FLAC (E)
+
+Decoded with the vendored dr_flac (`csrc/third_party`). FLAC is lossless, so the decoded samples
+equal ffmpeg's; what matters is the sample format and layout ffmpeg assigns:
+
+- up to 16 bits per sample → **s16** (left-justified), 17–32 bits → **s32** (left-justified)
+- channel layout: FLAC's channel assignment (1: FC, 2: FL FR, 3: FL FR FC, 4: FL FR BL BR,
+  5: FL FR FC BL BR, 6: FL FR FC LFE BL BR, 7: FL FR FC LFE BC SL SR, 8: FL FR FC LFE BL BR SL SR),
+  overridden by a Vorbis comment `WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x…` — ffmpeg writes it
+  whenever the layout differs from FLAC's (e.g. 2.1, 4.0) and applies it when decoding.
+
+### MP3 (E)
+
+Decoded with the vendored dr_mp3 (minimp3-based) in float output mode, so samples are **not
+clipped** before resampling — like ffmpeg's `mp3float` decoder, whose output exceeds ±1 on loud
+material (dr_mp3's default s16-based output clips and then differs by thousands of LSB after
+resampling). Encoder delay and padding from a LAME/Xing/Info header are removed (delay + 529
+samples at the start, padding − 529 at the end), as ffmpeg does; without such a header neither
+trims. The decoders differ by ≤ 5·10⁻⁶ before conversion, which gives **≤ 1 LSB** in ~1 % of the
+output samples; length and alignment are identical. Only MPEG-1/2/2.5 Layer III is detected.
+
 ### Raw PCM
 
 Headerless s16le, 16 kHz, mono (`int16 / 32768`); an odd trailing byte is dropped. Selected by
@@ -230,7 +251,8 @@ Layer III frame headers so that raw PCM is never taken for MP3).
 | exact-mode resampling (all common rates), float/double/int16 paths | bit-exact samples; length per table above |
 | interpolated-mode resampling (non-standard rates) | ≤ 1 LSB |
 | float path vs. ffmpeg on non-FMA / ARM CPUs | ≤ 1 LSB (ffmpeg itself differs) |
-| MP3 | decoder-dependent; see M9.4 |
+| FLAC | bit-exact (same as WAV) |
+| MP3 | ≤ 1 LSB (~1 % of samples), same length and alignment |
 
 ## How this was measured
 

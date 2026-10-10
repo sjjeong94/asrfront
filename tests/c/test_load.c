@@ -247,10 +247,13 @@ static void test_raw_and_detection(void) {
     memcpy(fake, "\xFF\xFB\x90\x64", 4); /* one valid Layer III header, no second frame */
     CHECK(af_load_memory(fake, sizeof fake, AF_RAW_AUTO, &a, &n) == AF_OK && n == 2048);
     af_audio_free(a);
-    /* two consecutive valid frames (128 kbps, 44.1 kHz: 417 bytes) -> MP3 (not decoded yet) */
+    /* two consecutive valid frames (128 kbps, 44.1 kHz: 417 bytes) -> decoded as MP3, not raw */
     memcpy(fake + 417, "\xFF\xFB\x90\x64", 4);
-    CHECK(af_load_memory(fake, sizeof fake, AF_RAW_AUTO, &a, &n) == AF_EUNSUPPORTED);
-    CHECK(af_load_memory("fLaC\0\0\0\x22", 8, AF_RAW_AUTO, &a, &n) == AF_EUNSUPPORTED);
+    int rc = af_load_memory(fake, sizeof fake, AF_RAW_AUTO, &a, &n);
+    CHECK((rc == AF_OK && n != 2048) || rc == AF_ECORRUPT);
+    af_audio_free(a);
+    /* FLAC magic with a broken stream: an error, not raw PCM */
+    CHECK(af_load_memory("fLaC\0\0\0\x22", 8, AF_RAW_AUTO, &a, &n) == AF_ECORRUPT);
     CHECK(af_load_memory("fLaC\0\0\0\x22", 8, AF_RAW_FORCE, &a, &n) == AF_OK && n == 4);
     af_audio_free(a);
 }
