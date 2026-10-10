@@ -261,6 +261,28 @@ resamplers differ from each other (the largest differences sit in the top mel bi
 cutoff, and for 8 kHz input in the empty band above 4 kHz). Not checked: model output (needs
 the model weights).
 
+## Other platforms (aarch64)
+
+asrfront's output does not depend on the CPU: the float resampler uses `fmaf()` (correctly
+rounded), every other float operation has a fixed order and no contraction, so x86-64 (avx2,
+generic, scalar kernels) and aarch64 give **bit-identical** `load()` results and features.
+ffmpeg itself does not: its float resampling kernel differs per CPU. Checked with the aarch64
+build of the same ffmpeg 7.0.2 (`imageio-ffmpeg` manylinux2014_aarch64 wheel) and asrfront
+cross-compiled for aarch64 (zig cc, musl), both run under qemu-aarch64 8.2, on 12 files (WAV
+7 formats/rates/layouts, FLAC 2, MP3 3; jfk.wav converted):
+
+| | 16 kHz / u8 / f64 input | resampled WAV / FLAC (float path) | MP3 |
+|---|---|---|---|
+| ffmpeg aarch64 vs. ffmpeg x86-64 (AVX2+FMA3) | identical | ≤ 1 LSB, ~0.02 % of samples | ≤ 1 LSB, ~0.2 % |
+| asrfront (any CPU) vs. ffmpeg aarch64 | identical | ≤ 1 LSB, ~0.02 % | ≤ 1 LSB, ~0.08 % |
+| asrfront (any CPU) vs. ffmpeg x86-64 | identical | identical | ≤ 1 LSB |
+
+Lengths were identical everywhere. So on ARM, asrfront matches whisper's ffmpeg-based loading
+to within 1 LSB — the same amount by which ffmpeg differs between the two architectures. On
+aarch64 `fmaf()` compiles to NEON `fmla` (no libm call). Not measured: speed on real ARM
+hardware (qemu only); the wheels themselves are built with GCC in CI, where the aarch64 test job
+runs the bit-exact C-vs-reference tests natively.
+
 ## Summary of accuracy targets (M9)
 
 | Case | Target |
@@ -268,7 +290,7 @@ the model weights).
 | 16 kHz, any format, any channel count | bit-exact (f64 with ≥ 5 channels: ≤ 1 LSB) |
 | exact-mode resampling (all common rates), float/double/int16 paths | bit-exact samples; length per table above |
 | interpolated-mode resampling (non-standard rates) | ≤ 1 LSB |
-| float path vs. ffmpeg on non-FMA / ARM CPUs | ≤ 1 LSB (ffmpeg itself differs) |
+| float path vs. ffmpeg on non-FMA / ARM CPUs | ≤ 1 LSB (ffmpeg itself differs; aarch64 measured, see above) |
 | FLAC | bit-exact (same as WAV) |
 | MP3 | ≤ 1 LSB (~1 % of samples), same length and alignment |
 

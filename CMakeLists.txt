@@ -71,7 +71,8 @@ if(MSVC)
 else()
   # Corrupt FLAC data overflows int32 sample arithmetic in dr_flac: make it defined
   # (wraparound -> noise) instead of undefined behavior.
-  target_compile_options(asrfront_drlibs PRIVATE -w -fwrapv)
+  # -ffp-contract=off: same decoded samples whatever the compiler (Clang contracts by default).
+  target_compile_options(asrfront_drlibs PRIVATE -w -fwrapv -ffp-contract=off)
 endif()
 list(APPEND ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_drlibs>)
 

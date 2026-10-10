@@ -14,7 +14,9 @@ has one local patch: `drflac__be2host_32_ptr_unaligned` / `drflac__le2host_32_pt
 each byte to `drflac_uint32` before shifting (upstream shifts a promoted `int`, which is undefined
 behavior for bytes ≥ 0x80 << 24; found by UBSan fuzzing of Vorbis comment lengths). The
 library is compiled with `-fwrapv` (GCC/Clang) because corrupt FLAC residuals overflow its
-int32 sample arithmetic; with `-fwrapv` this wraps (garbage audio) instead of being undefined. They are compiled once in
+int32 sample arithmetic; with `-fwrapv` this wraps (garbage audio) instead of being undefined.
+It is also compiled with `-ffp-contract=off` like the rest of the C code, so the MP3 decoder's
+float output does not depend on the compiler (Clang would otherwise fuse multiply-adds). They are compiled once in
 `dr_libs.c` with `DR_FLAC_NO_STDIO`, `DR_FLAC_NO_OGG` and `DR_MP3_NO_STDIO` (memory decoding
 only). To update: download both headers from a newer commit, rerun the test suite
 (`uv run --group load pytest`) and update this table.
