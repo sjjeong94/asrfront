@@ -193,9 +193,19 @@ static void test_wav_errors(void) {
     put(&w, "data\0\0\0\0", 8);
     CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_EUNSUPPORTED);
 
-    wav_head(&w, 1, 1, 44100, 16, 0); /* needs resampling (M9.3) */
+    wav_head(&w, 1, 1, 500, 16, 0); /* sample rate outside the resampler's range */
     put(&w, "data\2\0\0\0\0\0", 10);
     CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_EUNSUPPORTED);
+
+    wav_head(&w, 1, 1, 48000, 16, 0); /* resampled: 300 -> ceil((300 - 1) / 3) = 100 */
+    put(&w, "data", 4);
+    put32(&w, 600);
+    for (int i = 0; i < 300; i++)
+        put16(&w, 1000);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_OK && n == 100);
+    if (a && n == 100) /* DC is preserved by phase 0 */
+        CHECK(a[50] == 1000.0f / 32768.0f);
+    af_audio_free(a);
 
     wav_head(&w, 1, 1, 16000, 16, 0); /* chunk claiming more than the file */
     put(&w, "LIST\xFF\xFF\x00\x00", 8);

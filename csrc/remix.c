@@ -1,10 +1,12 @@
 /* Channel layouts, mono downmix and conversion to s16, with ffmpeg's arithmetic
  * (docs/load.md, "Pipeline overview" and "Downmix"). */
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "asrfront.h"
 #include "audio.h"
+#include "resample.h"
 
 int af_default_layout(int channels, uint32_t *layout) {
     static const uint32_t defaults[8][8] = {
@@ -127,65 +129,138 @@ static float float_sample(const af_decoded *d, size_t i) {
     }
 }
 
-int af_audio_to_mono(const af_decoded *d, float *out) {
-    const int ch = d->channels;
-    const size_t n = d->n_frames;
-    double w[AF_MAX_CHANNELS];
-    af_downmix_weights(d->layout, ch, w);
+/* ffmpeg's arithmetic path (docs/load.md, "Internal sample format by decoder output"). */
+typedef enum { PATH_INT16, PATH_S32_SHIFT, PATH_FLOAT, PATH_DOUBLE } path_t;
 
-    if (d->fmt == AF_SFMT_U8 || d->fmt == AF_SFMT_S16) {
-        /* int16 path: Q15 weights, rounded shift, wraps instead of saturating */
+static path_t select_path(const af_decoded *d, int resample) {
+    if (d->fmt == AF_SFMT_U8 || (d->fmt == AF_SFMT_S16 && !resample))
+        return PATH_INT16;
+    if (d->fmt == AF_SFMT_S32 && d->channels == 1 && !resample)
+        return PATH_S32_SHIFT;
+    return d->fmt == AF_SFMT_F64 ? PATH_DOUBLE : PATH_FLOAT;
+}
+
+static const size_t elem_size[] = {sizeof(int32_t), sizeof(int32_t), sizeof(float), sizeof(double)};
+
+/* Channel c of d in the path's working type, into dst (n_frames elements). */
+static void extract(const af_decoded *d, path_t path, int c, void *dst) {
+    const size_t n = d->n_frames, ch = (size_t)d->channels;
+    for (size_t i = 0; i < n; i++) {
+        size_t j = i * ch + (size_t)c;
+        switch (path) {
+        case PATH_INT16:
+            ((int32_t *)dst)[i] = int_sample(d, j);
+            break;
+        case PATH_S32_SHIFT:
+            ((int32_t *)dst)[i] = (int32_t)floor_shift(((const int32_t *)d->data)[j], 16);
+            break;
+        case PATH_FLOAT:
+            ((float *)dst)[i] = float_sample(d, j);
+            break;
+        case PATH_DOUBLE:
+            ((double *)dst)[i] = ((const double *)d->data)[j];
+            break;
+        }
+    }
+}
+
+/* Mix planar channels (n samples each) to mono float32 = s16 / 32768. */
+static void mix(path_t path, void *const *chan, int ch, const double *w, size_t n, float *out) {
+    if (path == PATH_INT16 || path == PATH_S32_SHIFT) {
+        /* Q15 weights, rounded shift, wraps instead of saturating */
         int64_t q[AF_MAX_CHANNELS];
         for (int c = 0; c < ch; c++)
             q[c] = (int64_t)nearbyint(w[c] * 32768.0);
         for (size_t i = 0; i < n; i++) {
             int64_t v;
             if (ch == 1) {
-                v = int_sample(d, i);
+                v = ((const int32_t *)chan[0])[i];
             } else {
                 int64_t acc = 16384;
                 for (int c = 0; c < ch; c++)
-                    acc += (int64_t)int_sample(d, i * (size_t)ch + (size_t)c) * q[c];
+                    acc += (int64_t)((const int32_t *)chan[c])[i] * q[c];
                 v = floor_shift(acc, 15);
             }
             out[i] = s16_to_float(wrap16(v));
         }
-    } else if (d->fmt == AF_SFMT_S32 && ch == 1) {
-        const int32_t *x = d->data;
-        for (size_t i = 0; i < n; i++)
-            out[i] = s16_to_float((int16_t)floor_shift(x[i], 16));
-    } else if (d->fmt == AF_SFMT_F64) {
-        const double *x = d->data;
+    } else if (path == PATH_DOUBLE) {
         for (size_t i = 0; i < n; i++) {
-            double acc;
-            if (ch == 1) {
-                acc = x[i];
-            } else {
+            double acc = ((const double *)chan[0])[i];
+            if (ch > 1) {
                 acc = 0.0;
                 for (int c = 0; c < ch; c++) {
-                    double p = x[i * (size_t)ch + (size_t)c] * w[c];
+                    double p = ((const double *)chan[c])[i] * w[c];
                     acc = acc + p;
                 }
             }
             out[i] = s16_to_float(sat16d(acc * 32768.0));
         }
-    } else { /* float path: s32 multichannel, f32 */
+    } else {
         float wf[AF_MAX_CHANNELS];
         for (int c = 0; c < ch; c++)
             wf[c] = (float)w[c];
         for (size_t i = 0; i < n; i++) {
-            float acc;
-            if (ch == 1) {
-                acc = float_sample(d, i);
-            } else {
+            float acc = ((const float *)chan[0])[i];
+            if (ch > 1) {
                 acc = 0.0f;
                 for (int c = 0; c < ch; c++) {
-                    float p = float_sample(d, i * (size_t)ch + (size_t)c) * wf[c];
+                    float p = ((const float *)chan[c])[i] * wf[c];
                     acc = acc + p; /* separate statements: no FMA contraction */
                 }
             }
             out[i] = s16_to_float(sat16f(acc * 32768.0f));
         }
     }
-    return AF_OK;
+}
+
+int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out) {
+    const int ch = d->channels;
+    const size_t n = d->n_frames;
+    const int resample = d->sample_rate != sr_out;
+    const path_t path = select_path(d, resample);
+    af_resampler *rs = NULL;
+    int rc = AF_OK;
+    *out = NULL;
+    *n_out = 0;
+    if (resample && (rc = af_resampler_create(d->sample_rate, sr_out, &rs)) != AF_OK)
+        return rc;
+    size_t m = resample ? af_resampler_out_len(rs, n) : n;
+    const size_t es = elem_size[path];
+
+    void *chan[AF_MAX_CHANNELS] = {0};
+    void *tmp = NULL;
+    float *res = malloc(m > 0 ? m * sizeof(float) : 1);
+    if (!res || (resample && !(tmp = malloc(n > 0 ? n * es : 1))))
+        rc = AF_ENOMEM;
+    for (int c = 0; c < ch && rc == AF_OK; c++) {
+        if (!(chan[c] = malloc(m > 0 ? m * es : 1))) {
+            rc = AF_ENOMEM;
+            break;
+        }
+        if (!resample) {
+            extract(d, path, c, chan[c]);
+            continue;
+        }
+        extract(d, path, c, tmp);
+        if (path == PATH_FLOAT)
+            af_resample_f32(rs, tmp, n, chan[c]);
+        else if (path == PATH_DOUBLE)
+            af_resample_f64(rs, tmp, n, chan[c]);
+        else
+            af_resample_s16(rs, tmp, n, chan[c]);
+    }
+    if (rc == AF_OK) {
+        double w[AF_MAX_CHANNELS];
+        af_downmix_weights(d->layout, ch, w);
+        mix(path, chan, ch, w, m, res);
+        *out = res;
+        *n_out = m;
+        res = NULL;
+    }
+    for (int c = 0; c < ch; c++)
+        free(chan[c]);
+    free(tmp);
+    free(res);
+    af_resampler_destroy(rs);
+    return rc;
 }

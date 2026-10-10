@@ -506,8 +506,12 @@ def ffmpeg_resample(
             elif path == "double":
                 h = bank_c[m] + (bank_c[m + 1] - bank_c[m]) * a[:, None]
                 out[k] = np.einsum("ij,ij->i", h, xs)
-            else:
-                raise NotImplementedError("int16 path in interpolated mode")
+            else:  # interpolate the accumulators (<= 1 LSB vs. ffmpeg, docs/load.md)
+                xi = xs.astype(np.int64)
+                a1 = (bank_c[m] * xi).sum(axis=1)
+                a2 = (bank_c[m + 1] * xi).sum(axis=1)
+                acc = a1 + ((a2 - a1) * (fp - m * q)) // q
+                out[k] = np.clip((acc + 16384) >> 15, -32768, 32767)
     return out
 
 

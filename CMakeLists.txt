@@ -63,6 +63,7 @@ add_library(asrfront_core STATIC
   csrc/kernels.c
   csrc/melbank.c
   csrc/remix.c
+  csrc/resample.c
   csrc/wav.c
   csrc/whisper.c
   csrc/sensevoice.c

@@ -5,6 +5,7 @@
 #include <nanobind/stl/optional.h>
 
 #include <cstring>
+#include <memory>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -12,7 +13,8 @@
 
 #include "asrfront.h"
 extern "C" {
-#include "melbank.h" // internal; exposed for tests only
+#include "melbank.h"  // internal; exposed for tests only
+#include "resample.h" // internal; exposed for tests only
 }
 
 namespace nb = nanobind;
@@ -205,6 +207,52 @@ NB_MODULE(_ext, m) {
         "data"_a, "raw"_a,
         "Decode an in-memory audio file to 16 kHz mono float32. raw: 0 auto, 1 never, 2 force "
         "(raw = headerless s16le 16 kHz mono).");
+
+    m.def(
+        "_resample",
+        [](nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu, nb::ndim<1>> x, int sr_in,
+           int sr_out) {
+            af_resampler *r = nullptr;
+            check(af_resampler_create(sr_in, sr_out, &r));
+            std::unique_ptr<af_resampler, void (*)(af_resampler *)> guard(r, af_resampler_destroy);
+            size_t n = x.shape(0), m = af_resampler_out_len(r, n);
+            nb::dlpack::dtype dt = x.dtype();
+            if (dt == nb::dtype<float>()) {
+                float *y = new float[m > 0 ? m : 1];
+                nb::capsule owner(y, [](void *p) noexcept { delete[] static_cast<float *>(p); });
+                af_resample_f32(r, static_cast<const float *>(x.data()), n, y);
+                return nb::cast(nb::ndarray<nb::numpy, float, nb::ndim<1>>(y, {m}, owner));
+            }
+            if (dt == nb::dtype<double>()) {
+                double *y = new double[m > 0 ? m : 1];
+                nb::capsule owner(y, [](void *p) noexcept { delete[] static_cast<double *>(p); });
+                af_resample_f64(r, static_cast<const double *>(x.data()), n, y);
+                return nb::cast(nb::ndarray<nb::numpy, double, nb::ndim<1>>(y, {m}, owner));
+            }
+            if (dt == nb::dtype<int32_t>()) {
+                int32_t *y = new int32_t[m > 0 ? m : 1];
+                nb::capsule owner(y, [](void *p) noexcept { delete[] static_cast<int32_t *>(p); });
+                af_resample_s16(r, static_cast<const int32_t *>(x.data()), n, y);
+                return nb::cast(nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(y, {m}, owner));
+            }
+            throw nb::type_error("x must be float32 (float path), float64 or int32 (int16 path)");
+        },
+        "x"_a, "sr_in"_a, "sr_out"_a = AF_SAMPLE_RATE, "Resample one channel (testing).");
+
+    m.def(
+        "_resample_bank",
+        [](int sr_in, int sr_out) {
+            af_resampler *r = nullptr;
+            check(af_resampler_create(sr_in, sr_out, &r));
+            std::unique_ptr<af_resampler, void (*)(af_resampler *)> guard(r, af_resampler_destroy);
+            size_t rows = (size_t)af_resampler_phases(r) + 1, cols = (size_t)af_resampler_taps(r);
+            double *b = new double[rows * cols];
+            nb::capsule owner(b, [](void *p) noexcept { delete[] static_cast<double *>(p); });
+            for (size_t i = 0; i < rows; i++)
+                std::memcpy(b + i * cols, af_resampler_bank(r, (int)i), cols * sizeof(double));
+            return nb::ndarray<nb::numpy, double, nb::ndim<2>>(b, {rows, cols}, owner);
+        },
+        "sr_in"_a, "sr_out"_a = AF_SAMPLE_RATE, "(phases + 1, N) float64 filter bank (testing).");
 
     nb::class_<Whisper>(m, "WhisperFrontend")
         .def(nb::init<int, bool, int>(), "n_mels"_a = 80, "pad_or_trim"_a = true, "n_threads"_a = 1)

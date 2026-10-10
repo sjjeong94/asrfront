@@ -111,8 +111,8 @@ def test_errors(tmp_path):
     truncated = write_wav(tmp_path / "t.wav", noise_s16(100)).read_bytes()[:30]
     with pytest.raises(ValueError, match="malformed"):
         asrfront.load(truncated)
-    with pytest.raises(ValueError, match="unsupported"):  # resampling arrives in M9.3
-        asrfront.load(write_wav(tmp_path / "r.wav", noise_s16(100), sr=44100))
+    with pytest.raises(ValueError, match="unsupported"):  # outside 1 kHz .. 384 kHz
+        asrfront.load(write_wav(tmp_path / "r.wav", noise_s16(100), sr=500))
     with pytest.raises(TypeError):
         asrfront.load(123)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
@@ -166,9 +166,14 @@ def whisper_load_audio(path: Path) -> np.ndarray:
 
 
 def ffmpeg_write(
-    path: Path, x: np.ndarray, codec: str, layout: str | None = None, extra: tuple[str, ...] = ()
+    path: Path,
+    x: np.ndarray,
+    codec: str,
+    layout: str | None = None,
+    extra: tuple[str, ...] = (),
+    sr: int = 16000,
 ) -> Path:
-    """Encode float64 samples (n, ch) to a WAV with ffmpeg."""
+    """Encode float64 samples (n, ch) at rate sr to a file with ffmpeg."""
     ch = x.shape[1]
     lay = ["-ch_layout", layout] if layout else ["-ac", str(ch)]
     cmd = [
@@ -180,7 +185,7 @@ def ffmpeg_write(
         "-f",
         "f64le",
         "-ar",
-        "16000",
+        str(sr),
         *lay,
         "-i",
         "-",
@@ -362,3 +367,90 @@ def test_ffmpeg_mismatched_channel_mask(tmp_path, ch, mask):
     path = tmp_path / "m.wav"
     path.write_bytes(b"RIFF" + struct.pack("<I", len(data)) + data)
     np.testing.assert_array_equal(asrfront.load(path), whisper_load_audio(path))
+
+
+# ---------------------------------------------------------------------------------------------
+# Resampling (M9.3), against ffmpeg
+# ---------------------------------------------------------------------------------------------
+
+# Rates whose output length matches ffmpeg exactly (docs/load.md, "Output length").
+EXACT_LENGTH_RATES = {8000, 11025, 12000, 24000, 32000, 48000, 96000}
+
+
+def _host_has_fma() -> bool:
+    import platform
+
+    if platform.machine().lower() not in ("x86_64", "amd64"):
+        return False
+    try:
+        flags = Path("/proc/cpuinfo").read_text()
+    except OSError:
+        return False
+    return " avx2" in flags and " fma" in flags
+
+
+def assert_matches_ffmpeg(ours: np.ndarray, theirs: np.ndarray, sr: int, tol_lsb: int = 0) -> None:
+    """Same samples (to tol_lsb); length exact or (for some rates) the last sample may differ."""
+    if sr in EXACT_LENGTH_RATES:
+        assert len(ours) == len(theirs)
+    else:
+        assert abs(len(ours) - len(theirs)) <= 1, (len(ours), len(theirs))
+    n = min(len(ours), len(theirs))
+    if not _host_has_fma():
+        tol_lsb = max(tol_lsb, 1)  # ffmpeg's own float kernel differs without FMA3
+    diff = np.abs(ours[:n].astype(np.float64) - theirs[:n]) * 32768
+    assert diff.max(initial=0) <= tol_lsb, f"max diff {diff.max()} LSB, {np.sum(diff > 0)} differ"
+
+
+RATES = [8000, 11025, 22050, 24000, 32000, 44100, 48000, 96000]
+
+
+@pytest.mark.parametrize("sr", RATES)
+@pytest.mark.parametrize("ch", [1, 2, 6])
+@pytest.mark.parametrize("codec", ["pcm_u8", "pcm_s16le", "pcm_s24le", "pcm_f32le", "pcm_f64le"])
+def test_ffmpeg_resampled(tmp_path, codec, ch, sr):
+    path = ffmpeg_write(tmp_path / "a.wav", signal(sr // 2 + 13, ch, sr), codec, sr=sr)
+    # f64 with >= 5 channels: <= 1 LSB in rare near-tie samples (docs/load.md, Downmix)
+    tol = 1 if codec == "pcm_f64le" and ch >= 5 else 0
+    assert_matches_ffmpeg(asrfront.load(path), whisper_load_audio(path), sr, tol_lsb=tol)
+
+
+@pytest.mark.parametrize("sr", [16494, 44056])
+@pytest.mark.parametrize("codec", ["pcm_u8", "pcm_s16le", "pcm_f64le"])
+def test_ffmpeg_resampled_interpolated_mode(tmp_path, codec, sr):
+    """Non-standard rates: <= 1 LSB (docs/load.md)."""
+    path = ffmpeg_write(tmp_path / "a.wav", signal(sr // 2, 1, sr), codec, sr=sr)
+    assert_matches_ffmpeg(asrfront.load(path), whisper_load_audio(path), sr, tol_lsb=1)
+
+
+@pytest.mark.parametrize(
+    "sr,ch,codec",
+    [
+        (44100, 2, "pcm_s16le"),
+        (48000, 1, "pcm_s24le"),
+        (22050, 2, "pcm_f32le"),
+        (8000, 1, "pcm_mulaw"),
+    ],
+)
+def test_ffmpeg_speech_resampled(tmp_path, sr, ch, codec):
+    """11 s of real speech converted to another rate / layout / codec."""
+    path = tmp_path / "speech.wav"
+    subprocess.run(
+        [
+            _ffmpeg(),
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            str(DATA_DIR / "jfk.wav"),
+            "-ar",
+            str(sr),
+            "-ac",
+            str(ch),
+            "-acodec",
+            codec,
+            str(path),
+        ],
+        check=True,
+    )
+    assert_matches_ffmpeg(asrfront.load(path), whisper_load_audio(path), sr)

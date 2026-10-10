@@ -120,6 +120,9 @@ container in M9.2/M9.4 tests).
 
 ## Resampling
 
+Input rates from 1 kHz to 384 kHz are supported (asrfront limit; filters grow with the rate,
+N = 792 taps at 384 kHz).
+
 ### Filter design (E)
 
 Output sample *k* sits at input time `t_k = k · sr_in / 16000` (exactly; `t_0 = 0`, no delay).
@@ -172,6 +175,9 @@ reverse order.)
   In interpolated mode the two dot products `v1, v2` are interpolated as `v1 + (v2 − v1) · a`
   — this reproduces ffmpeg to ≤ 1 LSB in ~0.01 % of samples; the exact float order was not
   identified (documented deviation, non-standard rates only).
+- **int16 path** (interpolated mode): the two integer accumulators are interpolated,
+  `acc = acc1 + floor((acc2 − acc1) · fr / q)` before the shift — ≤ 1 LSB vs. ffmpeg in ~0.1 %
+  of samples (non-standard rates with 8-bit input only; documented deviation).
 - **int16 path**: taps quantized `q = clamp(lrint(h · 32768), −32768, 32767)` — so the unit tap
   of an upsampling filter's phase 0 is 32767, not 32768, and those outputs come out slightly
   attenuated (e.g. 21504 → 21503) — integer accumulation, `out = (acc + 16384) >> 15`, saturated.

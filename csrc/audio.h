@@ -63,8 +63,8 @@ int af_pcm_decode_raw(const uint8_t *buf, size_t size, af_decoded *out); /* s16l
 /* Mono downmix weights (normalized when their sum exceeds 1). */
 void af_downmix_weights(const uint32_t *layout, int channels, double *w);
 
-/* Decoded audio at 16 kHz -> mono float32 (int16 / 32768), ffmpeg's arithmetic.
- * out must hold d->n_frames samples. */
-int af_audio_to_mono(const af_decoded *d, float *out);
+/* Decoded audio -> mono float32 at sr_out (int16 / 32768): resample every channel, then
+ * downmix, with ffmpeg's arithmetic. *out is malloc'ed (n_out samples). */
+int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out);
 
 #endif

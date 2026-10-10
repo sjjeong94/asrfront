@@ -97,24 +97,9 @@ int af_load_memory(const void *buf_, size_t size, af_raw_mode raw, float **out, 
     if (rc != AF_OK)
         return rc;
 
-    if (d.sample_rate != AF_SAMPLE_RATE) {
-        af_decoded_free(&d);
-        return AF_EUNSUPPORTED; /* resampling: M9.3 */
-    }
-    float *res = malloc(d.n_frames > 0 ? d.n_frames * sizeof(float) : 1);
-    if (!res) {
-        af_decoded_free(&d);
-        return AF_ENOMEM;
-    }
-    rc = af_audio_to_mono(&d, res);
+    rc = af_audio_to_mono(&d, AF_SAMPLE_RATE, out, n_samples);
     af_decoded_free(&d);
-    if (rc != AF_OK) {
-        free(res);
-        return rc;
-    }
-    *out = res;
-    *n_samples = d.n_frames;
-    return AF_OK;
+    return rc;
 }
 
 static int has_raw_extension(const char *path) {

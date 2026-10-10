@@ -290,7 +290,7 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 
 **Total estimate: ~12–13 working days** (all milestones implemented; first GitHub CI run pending)
 
-### M9. Audio loading (~6.5 days) — in progress (M9.1, M9.2 done)
+### M9. Audio loading (~6.5 days) — in progress (M9.1–M9.3 done)
 - WAV / raw PCM / FLAC / MP3 → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
 
 ---
@@ -478,6 +478,25 @@ still give bit-identical results; the scalar fallback is slower on CPUs without 
 - Extra ffmpeg behavior found and specified: out-of-range / non-finite float samples (double path
   reproduced; float path position-dependent in ffmpeg, asrfront uses the SIMD rule).
 
+#### 7.2.4 M9.3 results
+
+- `csrc/resample.c` / `resample.h` (internal), written from `docs/load.md` only: Kaiser-sinc
+  bank (power-series I₀), exact / interpolated phases, mirrored edges, length rule; three paths:
+  float32 (8 accumulators + `fmaf` + tree reduction), float64, int16 (Q15, accumulator
+  interpolation for non-standard rates). Supported input rates 1 kHz – 384 kHz.
+- `remix.c` now works on planar channels: extract in the path's type → resample each channel
+  → downmix → s16. `af_audio_to_mono` allocates its output (length changes).
+- Python reference gained the int16 interpolated mode (≤ 1 LSB vs. ffmpeg, measured; documented).
+- Tests: `test_resample.py` (119: C vs. reference **bit-exact** on all paths, 18 rates incl.
+  1 kHz / 384 kHz and interpolated mode, inputs shorter than the filter, bank vs. reference);
+  `test_load.py` +130 resampled files vs. whisper's ffmpeg command (5 codecs × 1/2/6 channels ×
+  8 rates, interpolated rates, 11 s speech at 44.1k/48k/22.05k/8k) — bit-exact except the
+  documented deviations. ASan/UBSan: C tests, 3·10⁵ mutated WAVs, 400 random rates × short inputs.
+- **Speed (33 s speech, i5-14400F)**: 16 kHz 0.5 ms; resampled 22–103 ms (44.1k stereo 86 ms)
+  — slower than the ffmpeg subprocess (13–38 ms incl. process start) because the generic build
+  calls libm `fmaf` per tap. Fix in M9.5: AVX2+FMA3 kernel variant (dispatch must also check
+  FMA3), 8-tap vectorized dot products.
+
 ### 7.3 C design
 
 New files:
@@ -609,7 +628,7 @@ def load(source: str | os.PathLike[str] | bytes | bytearray | memoryview) -> np.
 |---|---|---|
 | M9.1 ✅ | Pin ffmpeg behavior per §7.2.1: probe-signal experiments first, swr source only for unexplained gaps (behavior notes only); write the `docs/load.md` spec; then write `ffmpeg_resample_ref` (Python) **from the spec** and confirm downmix/resample/rounding/length rules bit-exact vs. ffmpeg | 1.5 d |
 | M9.2 ✅ | WAV + raw PCM parser, downmix, s16 rounding, `af_load_memory/file` + format detection rules, Python `load(path | bytes)` (no resampling yet: non-16 kHz → `AF_EUNSUPPORTED` temporarily) | 1 d |
-| M9.3 | Resampler **from `docs/load.md` + DSP literature only, swr source not consulted** (§7.2.1): s16 integer path + float path, exact length/delay handling; internal only (one-shot) | 1.5 d |
+| M9.3 ✅ | Resampler **from `docs/load.md` + DSP literature only, swr source not consulted** (§7.2.1): s16 integer path + float path, exact length/delay handling; internal only (one-shot) | 1.5 d |
 | M9.4 | FLAC (dr_flac) + MP3 (dr_mp3, gapless trim) integration, strict MP3 sniffing | 1 d |
 | M9.5 | SIMD resampler kernels, benchmark vs. `whisper.load_audio` (ffmpeg subprocess) / `librosa.load`, end-to-end SenseVoice check, ASan + fuzz, README/docs, wheel size check | 1.5 d |
 
