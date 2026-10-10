@@ -227,11 +227,14 @@ void af_sensevoice_destroy(af_sensevoice *h);
 
 **Speed (30 s, i5-14400F)**: asrfront 5.8 ms vs. torch 5.0 ms (1 thread) / 2.0 ms (16 threads) — currently *slower* than torch. FFT is ~3.4 ms of it; the rest is mostly the 240k `log10f` calls and per-frame overhead. Closing the gap to the 5x target is M7's job (SIMD FFT across frames, fused power+mel, vectorized log).
 
-### M5. SenseVoice fbank (2 days)
-- [ ] Kaldi framing (snip_edges), DC removal, preemphasis, hamming, 512 FFT, kaldi mel, log
-- [ ] Compare `af_sensevoice_fbank_raw` against torchaudio kaldi.fbank
-- [ ] LFR, CMVN, `am.mvn` parser (Python); compare final output against FunASR
-- [ ] Dither option (xorshift RNG + Box–Muller), dither=0 by default
+### M5. SenseVoice fbank (2 days) — done
+- [x] Kaldi framing (snip_edges), DC removal, preemphasis, hamming, 512 FFT, kaldi mel, log (`csrc/sensevoice.c`; kaldi banks in `csrc/melbank.c`, generated in double)
+- [x] Compare `af_sensevoice_fbank_raw` against the float64 reference: worst 7.7e-4 (chirp), 6.8e-4 (DC offset), speech 2.0e-4 (target 1e-3); ≤ 2e-3 vs. torchaudio's float32 kaldi.fbank. The largest errors sit in low mel bins that pre-emphasis attenuates by ~30 dB, where float32 rounding relative to the frame peak dominates
+- [x] LFR, CMVN in C (any `lfr_m`/`lfr_n`; edge frames replicated as in FunASR), `load_cmvn` in Python (`asrfront.sensevoice.load_cmvn`, cached by path+mtime; `cmvn=` also accepts a path). Final features with SenseVoiceSmall's real `am.mvn`: worst 1.1e-4 vs. reference, 3.7e-5 vs. a FunASR-style torch pipeline (30 s speech)
+- [x] Dither option (xorshift64* + Box–Muller, splitmix64 seeding), dither=0 by default. **The RNG is reseeded from `seed` on every call**, so identical inputs give identical outputs (unlike torch's global RNG)
+- Real `am.mvn` test runs when `ASRFRONT_SENSEVOICE_MVN=/path/to/am.mvn` is set (file not vendored, license)
+
+**Speed (30 s, i5-14400F, with CMVN)**: asrfront 5.2 ms vs. FunASR-style torch 9.2 ms (1 thread, 1.8x) / 4.8 ms (16 threads); torchaudio `kaldi.fbank` alone 7.8 ms. Target 5x → M7.
 
 ### M6. Polish Python API (1 day)
 - [ ] dtype/shape validation with helpful error messages; int16/float64 input handling

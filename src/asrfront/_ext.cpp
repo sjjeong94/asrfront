@@ -138,6 +138,21 @@ NB_MODULE(_ext, m) {
         },
         "n_mels"_a, "Dense (n_mels, 201) slaney filters used by the whisper frontend (testing).");
 
+    m.def(
+        "_kaldi_mel_banks",
+        [](int n_mels) {
+            af_melbank *mb = nullptr;
+            check(af_melbank_kaldi(AF_SAMPLE_RATE, 512, n_mels, 20.0, 0.0, &mb));
+            size_t rows = (size_t)af_melbank_n_mels(mb), cols = (size_t)af_melbank_n_bins(mb);
+            Out2D res = compute_2d(rows, cols, [&](float *out) {
+                af_melbank_to_dense(mb, out);
+                return AF_OK;
+            });
+            af_melbank_destroy(mb);
+            return res;
+        },
+        "n_mels"_a, "Dense (n_mels, 257) kaldi filters used by the sensevoice frontend (testing).");
+
     nb::class_<Whisper>(m, "WhisperFrontend")
         .def(nb::init<int, bool, int>(), "n_mels"_a = 80, "pad_or_trim"_a = true, "n_threads"_a = 1)
         .def_ro("n_mels", &Whisper::n_mels)

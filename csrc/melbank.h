@@ -10,6 +10,14 @@ typedef struct af_melbank af_melbank;
 /* librosa.filters.mel(sr, n_fft, n_mels, fmin, fmax) with htk=False, norm='slaney',
  * reproducing librosa's float32 rounding (as in whisper's mel_filters.npz). */
 int af_melbank_slaney(int sr, int n_fft, int n_mels, double fmin, double fmax, af_melbank **out);
+
+/* torchaudio.compliance.kaldi.get_mel_banks (no VTLN) for an FFT of size `padded`:
+ * Kaldi mel scale 1127 ln(1 + f/700), triangles between low_freq and high_freq
+ * (high_freq <= 0 means nyquist + high_freq), no normalization, zero Nyquist bin.
+ * Computed in double (torchaudio uses float32). */
+int af_melbank_kaldi(int sr, int padded, int n_mels, double low_freq, double high_freq,
+                     af_melbank **out);
+
 void af_melbank_destroy(af_melbank *mb);
 
 int af_melbank_n_mels(const af_melbank *mb);

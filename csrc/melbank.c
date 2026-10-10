@@ -118,6 +118,48 @@ int af_melbank_slaney(int sr, int n_fft, int n_mels, double fmin, double fmax, a
     return rc;
 }
 
+static double kaldi_mel(double f) {
+    return 1127.0 * log(1.0 + f / 700.0);
+}
+
+int af_melbank_kaldi(int sr, int padded, int n_mels, double low_freq, double high_freq,
+                     af_melbank **out) {
+    if (!out)
+        return AF_EINVAL;
+    *out = NULL;
+    const double nyquist = 0.5 * sr;
+    if (high_freq <= 0.0)
+        high_freq += nyquist;
+    if (sr <= 0 || padded < 2 || padded % 2 != 0 || n_mels <= 0 || low_freq < 0.0 ||
+        high_freq <= low_freq || high_freq > nyquist)
+        return AF_EINVAL;
+
+    const int n_fft_bins = padded / 2;
+    const int n_bins = n_fft_bins + 1; /* plus the (always zero) Nyquist bin */
+    float *dense = calloc((size_t)n_mels * n_bins, sizeof(float));
+    if (!dense)
+        return AF_ENOMEM;
+
+    const double fft_bin_width = (double)sr / padded;
+    const double mel_low = kaldi_mel(low_freq), mel_high = kaldi_mel(high_freq);
+    const double mel_delta = (mel_high - mel_low) / (n_mels + 1);
+    for (int m = 0; m < n_mels; m++) {
+        const double left = mel_low + m * mel_delta;
+        const double center = mel_low + (m + 1.0) * mel_delta;
+        const double right = mel_low + (m + 2.0) * mel_delta;
+        for (int k = 0; k < n_fft_bins; k++) {
+            const double mel = kaldi_mel(fft_bin_width * k);
+            const double up = (mel - left) / (center - left);
+            const double down = (right - mel) / (right - center);
+            double w = up < down ? up : down;
+            dense[(size_t)m * n_bins + k] = (float)(w > 0.0 ? w : 0.0);
+        }
+    }
+    int rc = from_dense(dense, n_mels, n_bins, out);
+    free(dense);
+    return rc;
+}
+
 void af_melbank_destroy(af_melbank *mb) {
     if (!mb)
         return;
