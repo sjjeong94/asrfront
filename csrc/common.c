@@ -1,6 +1,8 @@
 #include "asrfront.h"
 
-const char *af_version(void) { return ASRFRONT_VERSION; }
+const char *af_version(void) {
+    return ASRFRONT_VERSION;
+}
 
 const char *af_strerror(int err) {
     switch (err) {

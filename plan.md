@@ -200,10 +200,20 @@ void af_sensevoice_destroy(af_sensevoice *h);
 - torchaudio builds the kaldi mel banks in float32 (errors up to ~1.4e-5), and with its float32 FFT this gives up to ~1.3e-3 log-domain error on low-energy bins (worst case: chirp). Accuracy targets for asrfront are therefore measured **against the float64 reference** (Whisper 1e-4, SenseVoice 1e-3); agreement with torchaudio is only expected to ~2e-3.
 - Whisper with `pad_or_trim=False` and ≤ 200 samples is an error in torch (reflect pad); asrfront's behavior for this case is decided in M4.
 
-### M3. FFT (2 days)
-- [ ] Scalar mixed-radix complex FFT → real FFT wrapper
-- [ ] Verify relative error < 1e-6 vs. naive DFT (double) for n=400, 512 (C tests)
-- [ ] Benchmark: ns per frame
+### M3. FFT (2 days) — done
+- [x] Scalar mixed-radix complex FFT → real FFT wrapper (`csrc/fft.{h,c}`, internal API `af_rfft_*`)
+  - iterative Stockham autosort (natural-order output, no bit reversal), radix-4/2/3/5 butterflies, any even n with n/2 = 2^a·3^b·5^c
+  - real FFT = n/2 complex FFT of packed even/odd samples + split post-processing
+  - one allocation per plan (twiddles + ping-pong buffers), no malloc on the hot path
+- [x] Verify vs. naive DFT (double) (`tests/c/test_fft.c`): 27 sizes from 2 to 2048 incl. 400/512, random/impulse/DC/near-Nyquist inputs. Max error relative to max|X| ≤ 1.7e-7 (target 1e-6); power spectrum ≤ 2e-6
+- [x] Benchmark (`bench/bench_fft.c`, `-DASRFRONT_BUILD_BENCH=ON`), rfft + power, i5-14400F, GCC 13 `-O3`, scalar:
+
+  | n | asrfront | torch.fft.rfft (1 thread, batch 3000) | numpy.fft.rfft (batch 3000) |
+  |---|---|---|---|
+  | 400 | ~1.13 µs/frame (3.4 ms / 30 s) | ~0.97 µs | ~1.71 µs |
+  | 512 | ~1.16–1.30 µs/frame | ~1.12 µs | ~2.20 µs |
+
+  Already on par with pocketfft without SIMD; M7 candidates: twiddle-free first stage, radix-8, SIMD across frames, fused power.
 
 ### M4. Whisper log_mel (2 days)
 - [ ] Periodic Hann, reflect pad, frame loop, power, slaney mel (80/128) generation + npz comparison

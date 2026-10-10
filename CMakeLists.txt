@@ -9,6 +9,7 @@ else()
 endif()
 option(ASRFRONT_BUILD_PYTHON "Build the nanobind Python extension" ${_asrfront_python_default})
 option(ASRFRONT_BUILD_TESTS "Build C unit tests" OFF)
+option(ASRFRONT_BUILD_BENCH "Build C benchmarks" OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -22,6 +23,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(asrfront_core STATIC
   csrc/common.c
+  csrc/fft.c
   csrc/whisper.c
   csrc/sensevoice.c
 )
@@ -55,7 +57,19 @@ endif()
 # ---------------------------------------------------------------------------
 if(ASRFRONT_BUILD_TESTS)
   enable_testing()
-  add_executable(test_api tests/c/test_api.c)
-  target_link_libraries(test_api PRIVATE asrfront_core)
-  add_test(NAME test_api COMMAND test_api)
+  foreach(t test_api test_fft)
+    add_executable(${t} tests/c/${t}.c)
+    target_include_directories(${t} PRIVATE csrc)  # internal headers
+    target_link_libraries(${t} PRIVATE asrfront_core)
+    add_test(NAME ${t} COMMAND ${t})
+  endforeach()
+endif()
+
+# ---------------------------------------------------------------------------
+# C benchmarks
+# ---------------------------------------------------------------------------
+if(ASRFRONT_BUILD_BENCH)
+  add_executable(bench_fft bench/bench_fft.c)
+  target_include_directories(bench_fft PRIVATE csrc)
+  target_link_libraries(bench_fft PRIVATE asrfront_core)
 endif()

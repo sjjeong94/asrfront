@@ -121,11 +121,11 @@ NB_MODULE(_ext, m) {
     m.attr("__version__") = af_version();
 
     nb::class_<Whisper>(m, "WhisperFrontend")
-        .def(nb::init<int, bool, int>(), "n_mels"_a = 80, "pad_or_trim"_a = true,
-             "n_threads"_a = 1)
+        .def(nb::init<int, bool, int>(), "n_mels"_a = 80, "pad_or_trim"_a = true, "n_threads"_a = 1)
         .def_ro("n_mels", &Whisper::n_mels)
-        .def("out_frames", [](const Whisper &w, size_t n) { return af_whisper_out_frames(w.h, n); },
-             "n_samples"_a)
+        .def(
+            "out_frames", [](const Whisper &w, size_t n) { return af_whisper_out_frames(w.h, n); },
+            "n_samples"_a)
         .def("log_mel", &Whisper::log_mel, "audio"_a);
 
     nb::class_<SenseVoice>(m, "SenseVoiceFrontend")
@@ -134,12 +134,14 @@ NB_MODULE(_ext, m) {
              "n_mels"_a = 80, "lfr_m"_a = 7, "lfr_n"_a = 6, "dither"_a = 0.0f, "seed"_a = 0,
              "cmvn_shift"_a = nb::none(), "cmvn_scale"_a = nb::none(), "n_threads"_a = 1)
         .def_prop_ro("feat_dim", [](const SenseVoice &s) { return af_sensevoice_feat_dim(s.h); })
-        .def("raw_frames",
-             [](const SenseVoice &s, size_t n) { return af_sensevoice_raw_frames(s.h, n); },
-             "n_samples"_a)
-        .def("out_frames",
-             [](const SenseVoice &s, size_t n) { return af_sensevoice_out_frames(s.h, n); },
-             "n_samples"_a)
+        .def(
+            "raw_frames",
+            [](const SenseVoice &s, size_t n) { return af_sensevoice_raw_frames(s.h, n); },
+            "n_samples"_a)
+        .def(
+            "out_frames",
+            [](const SenseVoice &s, size_t n) { return af_sensevoice_out_frames(s.h, n); },
+            "n_samples"_a)
         .def("fbank", &SenseVoice::fbank, "audio"_a)
         .def_ro("n_mels", &SenseVoice::n_mels)
         .def("fbank_raw", &SenseVoice::fbank_raw, "audio"_a);

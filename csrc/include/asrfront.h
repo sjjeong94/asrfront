@@ -60,14 +60,14 @@ int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, floa
 typedef struct af_sensevoice af_sensevoice;
 
 typedef struct af_sensevoice_config {
-    int n_mels;               /* 80 */
-    int lfr_m;                /* 7 */
-    int lfr_n;                /* 6 */
-    float dither;             /* 0.0 */
-    unsigned long long seed;  /* dither RNG seed */
-    const float *cmvn_shift;  /* NULL: no CMVN. Length n_mels * lfr_m. Copied. */
-    const float *cmvn_scale;  /* must be NULL iff cmvn_shift is NULL. Copied. */
-    int n_threads;            /* 0: auto, 1: single-threaded */
+    int n_mels;              /* 80 */
+    int lfr_m;               /* 7 */
+    int lfr_n;               /* 6 */
+    float dither;            /* 0.0 */
+    unsigned long long seed; /* dither RNG seed */
+    const float *cmvn_shift; /* NULL: no CMVN. Length n_mels * lfr_m. Copied. */
+    const float *cmvn_scale; /* must be NULL iff cmvn_shift is NULL. Copied. */
+    int n_threads;           /* 0: auto, 1: single-threaded */
 } af_sensevoice_config;
 
 void af_sensevoice_default_config(af_sensevoice_config *cfg);
