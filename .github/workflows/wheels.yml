@@ -1,5 +1,9 @@
 name: Wheels
 
+# Release: bump the version (pyproject.toml + csrc/include/asrfront.h), commit, then
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+# builds the sdist and all wheels, tests them and uploads them to PyPI.
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,14 +13,20 @@ on:
         default: false
   push:
     tags: ["v*"]
-  release:
-    types: [published]
 
 jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check that the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pyproject.toml version $version"
+            exit 1
+          fi
       - uses: astral-sh/setup-uv@v6
       - run: uv build --sdist --out-dir dist
       - uses: actions/upload-artifact@v4
@@ -62,9 +72,10 @@ jobs:
           skip-existing: true  # re-running for the same version is not an error
 
   publish:
-    # Publishing a GitHub release uploads to PyPI. Trusted publishing: register this
-    # repository / wheels.yml / environment "pypi" as a (pending) publisher on pypi.org first.
-    if: github.event_name == 'release'
+    # Pushing a v* tag uploads to PyPI (only if the tag matches the version and every wheel
+    # built and passed its tests). Trusted publishing: register this repository /
+    # wheels.yml / environment "pypi" as a (pending) publisher on pypi.org first.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [sdist, wheels]
     runs-on: ubuntu-latest
     environment: pypi
