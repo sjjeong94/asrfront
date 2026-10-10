@@ -276,10 +276,10 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 ### M8. Packaging & CI (1 day) — done (CI not yet run on GitHub)
 - [x] GitHub Actions (`.github/workflows/ci.yml`, checked with actionlint):
   - `lint`: ruff check/format, `mypy --strict`, clang-format
-  - `test`: Linux x86_64 / aarch64, macOS arm64 / Intel, Windows × Python 3.9 / 3.13 — `uv sync`, pytest, pytest again with `ASRFRONT_KERNELS=scalar`, C tests via CMake/CTest
+  - `test`: Linux x86_64 / aarch64, Windows × Python 3.9 / 3.13 — `uv sync`, pytest, pytest again with `ASRFRONT_KERNELS=scalar`, C tests via CMake/CTest
   - `reference`: full suite with torch/torchaudio (`--group ref`)
   - `sanitizers`: C tests and pytest against an ASan/UBSan build (both verified locally: all pass, extension instrumented)
-- [x] Wheels with cibuildwheel (`.github/workflows/wheels.yml`, config in `[tool.cibuildwheel]`): cp39–cp311 regular wheels + one **cp312-abi3** wheel per platform (nanobind `STABLE_ABI`, `wheel.py-api = "cp312"`; `abi3audit --strict` clean), manylinux x86_64/aarch64, macOS arm64/x86_64 (deployment target 10.15), Windows AMD64; sdist; PyPI trusted publishing on GitHub release (needs the `pypi` environment registered on PyPI)
+- [x] Wheels with cibuildwheel (`.github/workflows/wheels.yml`, config in `[tool.cibuildwheel]`): cp39–cp311 regular wheels + one **cp312-abi3** wheel per platform (nanobind `STABLE_ABI`, `wheel.py-api = "cp312"`; `abi3audit --strict` clean), manylinux x86_64/aarch64, Windows AMD64 (macOS removed from CI and wheels on request); sdist; PyPI trusted publishing on GitHub release (needs the `pypi` environment registered on PyPI)
   - verified locally: `uv build` (sdist → wheel), fresh venvs: abi3 wheel on Python 3.13 and sdist build on Python 3.9 both pass the test suite
 - [x] README: install, usage, performance and accuracy tables; MIT `LICENSE`
 - Portability work done here:

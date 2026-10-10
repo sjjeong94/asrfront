@@ -20,7 +20,7 @@ feat = asrfront.sensevoice.fbank(audio, cmvn="am.mvn")  # (T', 560)
 pip install asrfront
 ```
 
-Wheels: Linux (x86_64, aarch64), macOS (arm64, x86_64), Windows (x86_64); CPython 3.9+
+Wheels: Linux (x86_64, aarch64), Windows (x86_64); CPython 3.9+
 (one `abi3` wheel covers 3.12 and later). Building from source needs a C11/C++17 compiler.
 
 ## Usage
@@ -106,8 +106,10 @@ uv run cmake -S . -B build/ctest -G Ninja -DASRFRONT_BUILD_TESTS=ON -DASRFRONT_B
 uv run cmake --build build/ctest && uv run ctest --test-dir build/ctest
 ```
 
-The C API is in [`csrc/include/asrfront.h`](csrc/include/asrfront.h). See [`plan.md`](plan.md)
-for the design and implementation notes.
+The C API is in [`csrc/include/asrfront.h`](csrc/include/asrfront.h). The preprocessing of each
+model is documented step by step in [`docs/whisper.md`](docs/whisper.md) and
+[`docs/sensevoice.md`](docs/sensevoice.md); see [`plan.md`](plan.md) for design and
+implementation notes.
 
 ## License
 
