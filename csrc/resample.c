@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "asrfront.h"
+#include "kernels.h"
 #include "resample.h"
 
 #define FILTER_SIZE 32
@@ -25,9 +26,10 @@ struct af_resampler {
     int width;     /* N rounded up to a multiple of LANES (float bank row stride) */
     int phases;
     int exact;
-    double *bank;   /* (phases + 1) x n_taps */
-    float *bankf;   /* (phases + 1) x width, zero padded */
-    int32_t *bankq; /* (phases + 1) x n_taps, Q15 */
+    double *bank;                                            /* (phases + 1) x n_taps */
+    float *bankf;                                            /* (phases + 1) x width, zero padded */
+    int32_t *bankq;                                          /* (phases + 1) x n_taps, Q15 */
+    float (*dot)(const float *h, const float *x, int width); /* float path kernel */
 };
 
 static uint64_t gcd_u64(uint64_t a, uint64_t b) {
@@ -130,6 +132,7 @@ int af_resampler_create(int sr_in, int sr_out, af_resampler **out) {
                                                                 : v);
         }
     }
+    r->dot = af_kernels_select()->resample_dot;
     *out = r;
     return AF_OK;
 }
@@ -166,27 +169,39 @@ size_t af_resampler_out_len(const af_resampler *r, size_t n) {
     return (size_t)((m * r->q + r->p - 1) / r->p);
 }
 
-/* Position of output k: base sample b, filter row m and interpolation numerator fr / q. */
+/* Position of output k: base sample b, filter row m and interpolation numerator fr / q.
+ * Stepped incrementally (t_k = k * p / q) to avoid two 64-bit divisions per output. */
 typedef struct {
     ptrdiff_t b;
     int m;
     uint64_t fr;
+    uint64_t rem; /* k * p mod q */
+    uint64_t step_int, step_rem;
 } pos_t;
 
-static pos_t position(const af_resampler *r, size_t k) {
-    pos_t s;
-    uint64_t num = (uint64_t)k * r->p;
-    uint64_t rem = num % r->q;
-    s.b = (ptrdiff_t)(num / r->q);
+static void pos_init(const af_resampler *r, pos_t *s) {
+    memset(s, 0, sizeof(*s));
+    s->step_int = r->p / r->q;
+    s->step_rem = r->p % r->q;
+}
+
+static void pos_phase(const af_resampler *r, pos_t *s) {
     if (r->exact) {
-        s.m = (int)rem;
-        s.fr = 0;
+        s->m = (int)s->rem;
     } else {
-        uint64_t fp = rem * MAX_EXACT_PHASES;
-        s.m = (int)(fp / r->q);
-        s.fr = fp - (uint64_t)s.m * r->q;
+        uint64_t fp = s->rem * MAX_EXACT_PHASES;
+        s->m = (int)(fp / r->q);
+        s->fr = fp - (uint64_t)s->m * r->q;
     }
-    return s;
+}
+
+static void pos_next(const af_resampler *r, pos_t *s) {
+    s->b += (ptrdiff_t)s->step_int;
+    s->rem += s->step_rem;
+    if (s->rem >= r->q) {
+        s->rem -= r->q;
+        s->b++;
+    }
 }
 
 /* Input index with mirrored edges: x[-j] = x[j], x[n-1+j] = x[n-j]. */
@@ -214,43 +229,67 @@ static size_t mirror(ptrdiff_t i, size_t n) {
         }                                                                                          \
     } while (0)
 
-/* float32 dot product: 8 FMA accumulators, then (a0+a4, a1+a5, a2+a6, a3+a7), pairwise. */
-static float dot8_fma(const float *h, const float *x, int n_taps) {
-    float acc[LANES] = {0};
-    for (int i = 0; i < n_taps; i++)
-        acc[i % LANES] = fmaf(h[i], x[i], acc[i % LANES]);
-    float s0 = acc[0] + acc[4], s1 = acc[1] + acc[5], s2 = acc[2] + acc[6], s3 = acc[3] + acc[7];
-    float t0 = s0 + s2, t1 = s1 + s3;
-    return t0 + t1;
-}
-
 void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) {
     size_t n_out = af_resampler_out_len(r, n);
-    const int nt = r->n_taps;
-    float edge_[AF_RESAMPLE_MAX_RATE / 485 + 2]; /* N <= ceil(32 * sr / (0.97 * 16000)) */
-    for (size_t k = 0; k < n_out; k++) {
-        pos_t s = position(r, k);
+    const int nt = r->n_taps, wd = r->width;
+    const af_kernels *kern = af_kernels_select();
+    /* N <= ceil(32 * sr / (0.97 * 16000)), rounded up to a multiple of 8 */
+    float edge_[AF_RESAMPLE_MAX_RATE / 485 + 16] = {0};
+    const float *bh[4], *bx[4]; /* exact mode: interior outputs are computed 4 at a time */
+    size_t bk[4];
+    int nb = 0;
+    pos_t s;
+    pos_init(r, &s);
+    for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {
+        pos_phase(r, &s);
         const float *win;
-        GATHER(win, x, n, s.b, nt);
-        float v1 = dot8_fma(r->bankf + (size_t)s.m * r->width, win, nt);
+        /* the kernel reads `width` samples; the taps past N are zero */
+        ptrdiff_t first = s.b - nt / 2 + 1;
+        int interior = first >= 0 && first + wd <= (ptrdiff_t)n;
+        if (interior) {
+            win = x + first;
+        } else {
+            for (int i = 0; i < nt; i++)
+                edge_[i] = x[mirror(first + i, n)];
+            win = edge_; /* edge_[nt .. wd) stay zero */
+        }
+        const float *h1 = r->bankf + (size_t)s.m * wd;
+        if (r->exact && interior) {
+            bh[nb] = h1;
+            bx[nb] = win;
+            bk[nb++] = k;
+            if (nb == 4) {
+                float v[4];
+                kern->resample_dot4(bh, bx, wd, v);
+                for (int j = 0; j < 4; j++)
+                    y[bk[j]] = v[j];
+                nb = 0;
+            }
+            continue;
+        }
+        float v1 = r->dot(h1, win, wd);
         if (r->exact) {
             y[k] = v1;
         } else {
-            float v2 = dot8_fma(r->bankf + (size_t)(s.m + 1) * r->width, win, nt);
+            float v2 = r->dot(h1 + wd, win, wd);
             float a = (float)((double)s.fr / (double)r->q);
             float d = v2 - v1;
             float t = d * a;
             y[k] = v1 + t;
         }
     }
+    for (int j = 0; j < nb; j++)
+        y[bk[j]] = r->dot(bh[j], bx[j], wd);
 }
 
 void af_resample_f64(const af_resampler *r, const double *x, size_t n, double *y) {
     size_t n_out = af_resampler_out_len(r, n);
     const int nt = r->n_taps;
     double edge_[AF_RESAMPLE_MAX_RATE / 485 + 2];
-    for (size_t k = 0; k < n_out; k++) {
-        pos_t s = position(r, k);
+    pos_t s;
+    pos_init(r, &s);
+    for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {
+        pos_phase(r, &s);
         const double *win;
         GATHER(win, x, n, s.b, nt);
         const double *h1 = r->bank + (size_t)s.m * nt;
@@ -282,8 +321,10 @@ void af_resample_s16(const af_resampler *r, const int32_t *x, size_t n, int32_t 
     size_t n_out = af_resampler_out_len(r, n);
     const int nt = r->n_taps;
     int32_t edge_[AF_RESAMPLE_MAX_RATE / 485 + 2];
-    for (size_t k = 0; k < n_out; k++) {
-        pos_t s = position(r, k);
+    pos_t s;
+    pos_init(r, &s);
+    for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {
+        pos_phase(r, &s);
         const int32_t *win;
         GATHER(win, x, n, s.b, nt);
         const int32_t *h1 = r->bankq + (size_t)s.m * nt;

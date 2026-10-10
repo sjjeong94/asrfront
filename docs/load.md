@@ -243,6 +243,24 @@ a `.pcm` / `.raw` file extension, or for bytes input without a recognized header
 `plan.md` §7.3 for the detection rules; MP3 sync detection requires two consecutive valid
 Layer III frame headers so that raw PCM is never taken for MP3).
 
+## SenseVoice (FunASR) loading
+
+FunASR does not use ffmpeg for local files: `load_audio_text_image_video` reads with
+`torchaudio.load` (fallback soundfile), averages the channels in float32 and resamples with
+`torchaudio.transforms.Resample` (defaults). Measured on jfk.wav converted to other rates
+(`sensevoice.fbank_raw`, natural-log mel energies, |asrfront.load − FunASR-style|):
+
+| Input | mean | p99 | for comparison: torchaudio vs. librosa/soxr resampling (mean / p99) |
+|---|---|---|---|
+| 16 kHz mono / stereo | 0 | 0 | 0 / 0 |
+| 44.1 kHz stereo, 48 kHz, 22.05 kHz | 0.019–0.020 | 0.32–0.33 | 0.029 / 0.55 |
+| 8 kHz (upsampled) | 0.35 | 4.6 | 0.55 / 6.4 |
+
+So at 16 kHz the features are identical; for resampled input they differ less than two common
+resamplers differ from each other (the largest differences sit in the top mel bins near the
+cutoff, and for 8 kHz input in the empty band above 4 kHz). Not checked: model output (needs
+the model weights).
+
 ## Summary of accuracy targets (M9)
 
 | Case | Target |

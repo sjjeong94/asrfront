@@ -37,14 +37,16 @@ def load(source: Source) -> np.ndarray:
         path = os.fspath(source)
         if isinstance(path, bytes):
             path = os.fsdecode(path)
+        raw = _RAW_FORCE if path.lower().endswith(_RAW_EXTENSIONS) else _RAW_NEVER
+        # read() rather than mmap: a file truncated by another process while mapped would
+        # crash the interpreter with SIGBUS
         with open(path, "rb") as f:
             data = np.frombuffer(f.read(), dtype=np.uint8)
-        raw = _RAW_FORCE if path.lower().endswith(_RAW_EXTENSIONS) else _RAW_NEVER
-        what = repr(path)
-    else:
-        data = _as_bytes(source)
-        raw = _RAW_AUTO
-        what = f"{type(source).__name__} input"
+        return _decode(data, raw, repr(path))
+    return _decode(_as_bytes(source), _RAW_AUTO, f"{type(source).__name__} input")
+
+
+def _decode(data: np.ndarray, raw: int, what: str) -> np.ndarray:
     try:
         return _ext.load_memory(data, raw)
     except ValueError as e:

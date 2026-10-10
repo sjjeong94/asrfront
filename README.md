@@ -4,12 +4,15 @@ Super-fast frontend (feature extraction) for ASR models such as **Whisper** and
 **SenseVoiceSmall**.
 
 - native C core with no dependencies (own FFT, SIMD kernels with runtime CPU dispatch)
+- audio loading: WAV / FLAC / MP3 / raw PCM → 16 kHz mono, matching whisper's ffmpeg-based
+  `load_audio` without spawning ffmpeg
 - Python binding based on [nanobind](https://github.com/wjakob/nanobind), zero-copy NumPy output
 - numerically matches the reference implementations (see [Accuracy](#accuracy))
 
 ```python
 import asrfront
 
+audio = asrfront.load("speech.mp3")  # 16 kHz mono float32
 mel = asrfront.whisper.log_mel(audio)  # (80, 3000)
 feat = asrfront.sensevoice.fbank(audio, cmvn="am.mvn")  # (T', 560)
 ```
@@ -26,7 +29,27 @@ Wheels: Linux (x86_64, aarch64), Windows (x86_64); CPython 3.9+
 ## Usage
 
 `audio` is a 16 kHz mono waveform: a float array in [-1, 1], int16 PCM, a list, or a CPU
-torch tensor. Resampling and decoding are out of scope.
+torch tensor — e.g. from `asrfront.load`.
+
+### Loading audio
+
+```python
+audio = asrfront.load("speech.wav")  # path (str / os.PathLike)
+audio = asrfront.load(request_body)  # bytes / bytearray / memoryview / uint8 array
+audio = asrfront.load("stream.pcm")  # raw s16le 16 kHz mono (.pcm / .raw, or headerless bytes)
+```
+
+Returns a 1-D float32 array at 16 kHz mono (`asrfront.SAMPLE_RATE`), the input both Whisper and
+SenseVoiceSmall expect — the same as `whisper.load_audio(path)`, i.e.
+`ffmpeg -i FILE -f s16le -ac 1 -ar 16000` / 32768, but decoded in-process:
+
+- formats (detected from the content): WAV (PCM 8–32 bit, float, A-law/µ-law, RF64), FLAC, MP3
+- input rates 1 kHz – 384 kHz, any channel layout up to 8 channels (18 with a WAV channel mask)
+- WAV / FLAC / PCM: bit-identical to ffmpeg 7.0.2 at all common rates; MP3 (different decoder):
+  within 1/32768, same length. Details and the few documented deviations:
+  [`docs/load.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/load.md)
+- for SenseVoice: identical to FunASR's own loading at 16 kHz; for other rates FunASR resamples
+  with torchaudio, and the features differ less than between two standard resamplers
 
 ### Whisper
 
@@ -66,7 +89,7 @@ All native calls release the GIL. The `*_batch` functions spread items over a th
 ## Performance
 
 30 s of audio, single thread, Intel i5-14400F (AVX2), best of N runs
-(`uv run --group ref --group bench python bench/compare.py`):
+(`uv run --group ref --group bench --group load python bench/compare.py`):
 
 | | asrfront | reference | speed-up |
 |---|---|---|---|
@@ -74,11 +97,14 @@ All native calls release the GIL. The `*_batch` functions spread items over a th
 | | | librosa STFT + mel (numpy) 6.6–7.0 ms | ~7.7x |
 | SenseVoice fbank + LFR + CMVN | 1.3–1.4 ms | FunASR `WavFrontend` (torchaudio) 12–14 ms | ~9–10x |
 | kaldi fbank only | 1.3 ms | `torchaudio.compliance.kaldi.fbank` 11–12 ms | ~9x |
+| `load`: WAV 16 kHz | 0.3 ms | whisper `load_audio` (ffmpeg subprocess) 10 ms / `librosa.load` 2.5 ms | 33x / 8x |
+| `load`: WAV 44.1 kHz stereo | 14 ms | whisper `load_audio` 36 ms / `librosa.load` 31 ms | 2.5x / 2.2x |
+| `load`: MP3 44.1 kHz stereo | 25 ms | whisper `load_audio` 38 ms / `librosa.load` 34 ms | 1.5x / 1.4x |
 
 Full results (thread scaling, input lengths, kernel variants, methodology):
 [`docs/benchmark.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/benchmark.md).
 
-Kernels process 8 frames at a time in SIMD lanes. On x86-64 an AVX2 build is selected at
+Kernels process 8 frames at a time in SIMD lanes. On x86-64 an AVX2 (+FMA3) build is selected at
 runtime when available (`asrfront._ext.kernel_isa()`); `ASRFRONT_KERNELS=generic` forces the
 baseline build. All variants give bit-identical results. Batch of 32 × 30 s: ~7.5 ms with
 16 threads.
@@ -104,7 +130,7 @@ fbank (torchaudio builds its mel banks in float32).
 ```bash
 uv sync                       # create .venv and build the extension (needs a C compiler)
 uv run pytest                 # tests; add --group ref for torch/torchaudio comparisons
-uv run --group ref pytest
+uv run --group ref --group load pytest   # + comparisons against ffmpeg 7.0.2 (imageio-ffmpeg)
 uv run cmake -S . -B build/ctest -G Ninja -DASRFRONT_BUILD_TESTS=ON -DASRFRONT_BUILD_BENCH=ON
 uv run cmake --build build/ctest && uv run ctest --test-dir build/ctest
 ```
@@ -117,4 +143,6 @@ implementation notes.
 ## License
 
 MIT. Test data in `tests/data` comes from [openai/whisper](https://github.com/openai/whisper)
-(MIT); see [`tests/data/README.md`](https://github.com/sjjeong94/asrfront/blob/main/tests/data/README.md).
+(MIT); see [`tests/data/README.md`](https://github.com/sjjeong94/asrfront/blob/main/tests/data/README.md). FLAC and MP3 decoding use the vendored
+[dr_flac / dr_mp3](https://github.com/mackron/dr_libs) (public domain or MIT-0); see
+[`csrc/third_party/README.md`](https://github.com/sjjeong94/asrfront/blob/main/csrc/third_party/README.md).

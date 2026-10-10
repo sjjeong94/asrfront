@@ -1,6 +1,6 @@
 """Compare asrfront against reference frontends.
 
-    uv run --group ref --group bench python bench/compare.py [--json out.json]
+    uv run --group ref --group bench --group load python bench/compare.py [--json out.json]
 
 Sections:
   1. 30 s, single thread: asrfront vs. openai-whisper (torch), librosa, FunASR WavFrontend
@@ -8,6 +8,7 @@ Sections:
   2. 30 s, reference libraries with all threads (asrfront stays single-threaded)
   3. input-length sweep (1 / 5 / 10 / 30 / 120 s)
   4. batch throughput vs. number of threads
+  5. audio loading (asrfront.load) vs. whisper.load_audio's ffmpeg command and librosa.load
 
 Times are the best of several runs (``best_ms``); libraries that are not installed are
 skipped. Reference implementations live in tests/python/reference.py.
@@ -248,6 +249,93 @@ def bench_batch(audio: np.ndarray, batch: int) -> None:
             print(f"  {name:24s} {n:3d} threads {ms:8.2f} ms  ({base / ms:4.1f}x)")
 
 
+def bench_load(seconds: int = 30) -> None:
+    """Files of `seconds` of speech at several rates / codecs, decoded to 16 kHz mono."""
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        print("\n[5] Audio loading: skipped (needs the 'load' group for ffmpeg)")
+        return
+    import subprocess
+    import tempfile
+
+    try:
+        import librosa
+    except ImportError:
+        librosa = None
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    src = ROOT / "tests" / "data" / "jfk.wav"
+    loops = -(-seconds // 11) - 1  # jfk.wav is 11 s
+    print(f"\n[5] Audio loading, {seconds} s of speech -> 16 kHz mono float32, single thread")
+    cases = [
+        ("wav 16 kHz mono", 16000, 1, "pcm_s16le", "wav"),
+        ("wav 44.1 kHz stereo", 44100, 2, "pcm_s16le", "wav"),
+        ("wav 48 kHz mono", 48000, 1, "pcm_s16le", "wav"),
+        ("wav 8 kHz mono", 8000, 1, "pcm_s16le", "wav"),
+        ("flac 44.1 kHz stereo", 44100, 2, "flac", "flac"),
+        ("mp3 44.1 kHz stereo", 44100, 2, "libmp3lame", "mp3"),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, sr, ch, codec, ext in cases:
+            path = Path(tmp) / f"speech.{ext}"
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-stream_loop",
+                    str(loops),
+                    "-i",
+                    str(src),
+                    "-t",
+                    str(seconds),
+                    "-ar",
+                    str(sr),
+                    "-ac",
+                    str(ch),
+                    "-acodec",
+                    codec,
+                    str(path),
+                ],
+                check=True,
+            )
+            whisper_cmd = [
+                ffmpeg,
+                "-nostdin",
+                "-threads",
+                "0",
+                "-i",
+                str(path),
+                "-f",
+                "s16le",
+                "-ac",
+                "1",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-",
+            ]
+            sec = f"load_{name}"
+            print(f"  {name}")
+            base = best_ms(lambda p=path: asrfront.load(p), reps=10)
+            row(sec, "asrfront.load", base, None)
+            row(
+                sec,
+                "whisper.load_audio (ffmpeg subprocess)",
+                best_ms(lambda c=whisper_cmd: subprocess.run(c, capture_output=True), reps=3),
+                base,
+            )
+            if librosa is not None:
+                row(
+                    sec,
+                    "librosa.load(sr=16000) (soxr_hq)",
+                    best_ms(lambda p=path: librosa.load(p, sr=SR), reps=3),
+                    base,
+                )
+
+
 def environment() -> dict[str, str]:
     import importlib.metadata as md
 
@@ -281,6 +369,7 @@ def main() -> None:
     bench_multithread_refs(audio, os.cpu_count() or 1)
     bench_lengths(np.asarray(sigs["speech"]))
     bench_batch(audio, args.batch)
+    bench_load()
     if args.json:
         args.json.write_text(json.dumps({"env": env, "results": RESULTS}, indent=1))
 

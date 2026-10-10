@@ -290,7 +290,7 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 
 **Total estimate: ~12–13 working days** (all milestones implemented; first GitHub CI run pending)
 
-### M9. Audio loading (~6.5 days) — in progress (M9.1–M9.4 done)
+### M9. Audio loading (~6.5 days) — done
 - WAV / raw PCM / FLAC / MP3 → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
 
 ---
@@ -515,6 +515,26 @@ still give bit-identical results; the scalar fallback is slower on CPUs without 
   truncated files. ASan/UBSan: 2·10⁵ mutated FLAC/MP3 files.
 - MP3 accuracy is much better than the planned 1e-3 target (≤ 1 LSB ≈ 3e-5).
 
+#### 7.2.6 M9.5 results
+
+- Kernel table gained `resample_dot` / `resample_dot4` (8 FMA accumulators + tree; 4 outputs
+  interleaved). The `avx2` table is now built with `-mfma` and selected only with AVX2 **and**
+  FMA3; it uses `_mm256_fmadd_ps`. generic/scalar use `fmaf()` (libm call on x86-64 without
+  FMA3, one instruction on aarch64). All three variants pass the bit-exact tests.
+- Other speed-ups: incremental output positions (no 64-bit divisions), branch-free per-format
+  extraction, libm-free round-half-even for the s16 conversion, output written into channel 0's
+  buffer (fewer large allocations — page faults dominated small inputs on WSL2). Tried and
+  reverted: `mmap` for path input (16 kHz WAV 1.2 → 0.4 ms in Python, but a concurrently
+  truncated file would crash with SIGBUS).
+- Speed, 30 s speech (`bench/compare.py` [5], docs/benchmark.md §6): WAV 16 kHz 0.32 ms
+  (33x faster than whisper's ffmpeg subprocess, 8x librosa), 44.1 kHz stereo 14 ms (2.5x / 2.2x;
+  M9.3: 86 ms), MP3 44.1 kHz stereo 25 ms (1.5x / 1.4x); FLAC on par with ffmpeg; 8 kHz
+  upsampling slower than librosa/soxr (0.8x).
+- SenseVoice end-to-end (docs/load.md): identical to FunASR's loading at 16 kHz; for resampled
+  input the fbank difference is below the torchaudio-vs-soxr difference. Model-level checks
+  (decoded text) were not run: no model weights here.
+- README: `asrfront.load` usage, accuracy and performance; benchmark doc §6.
+
 ### 7.3 C design
 
 New files:
@@ -648,7 +668,7 @@ def load(source: str | os.PathLike[str] | bytes | bytearray | memoryview) -> np.
 | M9.2 ✅ | WAV + raw PCM parser, downmix, s16 rounding, `af_load_memory/file` + format detection rules, Python `load(path | bytes)` (no resampling yet: non-16 kHz → `AF_EUNSUPPORTED` temporarily) | 1 d |
 | M9.3 ✅ | Resampler **from `docs/load.md` + DSP literature only, swr source not consulted** (§7.2.1): s16 integer path + float path, exact length/delay handling; internal only (one-shot) | 1.5 d |
 | M9.4 ✅ | FLAC (dr_flac) + MP3 (dr_mp3, gapless trim) integration, strict MP3 sniffing | 1 d |
-| M9.5 | SIMD resampler kernels, benchmark vs. `whisper.load_audio` (ffmpeg subprocess) / `librosa.load`, end-to-end SenseVoice check, ASan + fuzz, README/docs, wheel size check | 1.5 d |
+| M9.5 ✅ | SIMD resampler kernels, benchmark vs. `whisper.load_audio` (ffmpeg subprocess) / `librosa.load`, end-to-end SenseVoice check, ASan + fuzz, README/docs, wheel size check | 1.5 d |
 
 **Total ~6.5 days.**
 

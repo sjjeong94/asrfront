@@ -92,15 +92,25 @@ static int16_t clip16(int64_t v) {
 /* float -> s16, x already scaled by 32768: round half to even, saturate. Out of int32 range or
  * NaN gives -32768, like ffmpeg's SIMD conversion (its scalar tail differs; docs/load.md). */
 static int16_t sat16f(float x) {
-    float r = nearbyintf(x);
-    if (!(r >= -2147483648.0f && r < 2147483648.0f))
+    if (!(x >= -2147483648.0f && x < 2147483648.0f)) /* NaN, or rint(x) outside int32 */
         return INT16_MIN;
-    return clip16((int64_t)r);
+    if (x >= 32767.0f)
+        return INT16_MAX;
+    if (x <= -32768.0f)
+        return INT16_MIN;
+    /* round half to even without libm (nearbyintf is a call on baseline x86-64): exact for
+     * |x| < 2^22 in the default rounding mode; -ffp-contract=off keeps the two steps apart */
+    float r = (x + 12582912.0f) - 12582912.0f;
+    return (int16_t)r;
 }
 
 /* double -> s16 as ffmpeg's scalar conversion: a 64-bit lrint (out of range / NaN gives
  * INT64_MIN) truncated to 32 bits, then saturated. */
 static int16_t sat16d(double x) {
+    if (x > -32768.0 && x < 32767.0) { /* common case: magic-number rint, exact here */
+        double r = (x + 6755399441055744.0) - 6755399441055744.0;
+        return (int16_t)r;
+    }
     double r = nearbyint(x);
     int64_t l = (r >= -9223372036854775808.0 && r < 9223372036854775808.0) ? (int64_t)r : INT64_MIN;
     uint32_t lo = (uint32_t)((uint64_t)l & 0xFFFFFFFFu);
@@ -110,23 +120,6 @@ static int16_t sat16d(double x) {
 
 static float s16_to_float(int16_t s) {
     return (float)s / 32768.0f;
-}
-
-static int32_t int_sample(const af_decoded *d, size_t i) {
-    if (d->fmt == AF_SFMT_U8)
-        return ((int32_t)((const uint8_t *)d->data)[i] - 128) * 256;
-    return ((const int16_t *)d->data)[i];
-}
-
-static float float_sample(const af_decoded *d, size_t i) {
-    switch (d->fmt) {
-    case AF_SFMT_S16:
-        return (float)((const int16_t *)d->data)[i] / 32768.0f;
-    case AF_SFMT_S32:
-        return (float)((const int32_t *)d->data)[i] * (1.0f / 2147483648.0f);
-    default:
-        return ((const float *)d->data)[i];
-    }
 }
 
 /* ffmpeg's arithmetic path (docs/load.md, "Internal sample format by decoder output"). */
@@ -143,24 +136,41 @@ static path_t select_path(const af_decoded *d, int resample) {
 static const size_t elem_size[] = {sizeof(int32_t), sizeof(int32_t), sizeof(float), sizeof(double)};
 
 /* Channel c of d in the path's working type, into dst (n_frames elements). */
+/* Channel c of d in the path's working type, into dst (n_frames elements). One loop per
+ * (path, format) pair so the inner loops are branch-free. */
+#define EXTRACT_LOOP(TYPE_IN, TYPE_OUT, EXPR)                                                      \
+    do {                                                                                           \
+        const TYPE_IN *src_ = (const TYPE_IN *)d->data + c;                                        \
+        TYPE_OUT *dst_ = dst;                                                                      \
+        for (size_t i = 0; i < n; i++) {                                                           \
+            TYPE_IN v = src_[i * ch];                                                              \
+            dst_[i] = (EXPR);                                                                      \
+        }                                                                                          \
+    } while (0)
+
 static void extract(const af_decoded *d, path_t path, int c, void *dst) {
     const size_t n = d->n_frames, ch = (size_t)d->channels;
-    for (size_t i = 0; i < n; i++) {
-        size_t j = i * ch + (size_t)c;
-        switch (path) {
-        case PATH_INT16:
-            ((int32_t *)dst)[i] = int_sample(d, j);
-            break;
-        case PATH_S32_SHIFT:
-            ((int32_t *)dst)[i] = (int32_t)floor_shift(((const int32_t *)d->data)[j], 16);
-            break;
-        case PATH_FLOAT:
-            ((float *)dst)[i] = float_sample(d, j);
-            break;
-        case PATH_DOUBLE:
-            ((double *)dst)[i] = ((const double *)d->data)[j];
-            break;
-        }
+    switch (path) {
+    case PATH_INT16:
+        if (d->fmt == AF_SFMT_U8)
+            EXTRACT_LOOP(uint8_t, int32_t, ((int32_t)v - 128) * 256);
+        else
+            EXTRACT_LOOP(int16_t, int32_t, (int32_t)v);
+        break;
+    case PATH_S32_SHIFT:
+        EXTRACT_LOOP(int32_t, int32_t, (int32_t)floor_shift(v, 16));
+        break;
+    case PATH_FLOAT:
+        if (d->fmt == AF_SFMT_S16)
+            EXTRACT_LOOP(int16_t, float, (float)v / 32768.0f);
+        else if (d->fmt == AF_SFMT_S32)
+            EXTRACT_LOOP(int32_t, float, (float)v * (1.0f / 2147483648.0f));
+        else
+            EXTRACT_LOOP(float, float, v);
+        break;
+    case PATH_DOUBLE:
+        EXTRACT_LOOP(double, double, v);
+        break;
     }
 }
 
@@ -229,8 +239,7 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
 
     void *chan[AF_MAX_CHANNELS] = {0};
     void *tmp = NULL;
-    float *res = malloc(m > 0 ? m * sizeof(float) : 1);
-    if (!res || (resample && !(tmp = malloc(n > 0 ? n * es : 1))))
+    if (resample && !(tmp = malloc(n > 0 ? n * es : 1)))
         rc = AF_ENOMEM;
     for (int c = 0; c < ch && rc == AF_OK; c++) {
         if (!(chan[c] = malloc(m > 0 ? m * es : 1))) {
@@ -252,15 +261,22 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
     if (rc == AF_OK) {
         double w[AF_MAX_CHANNELS];
         af_downmix_weights(d->layout, ch, w);
+        /* The output reuses channel 0's buffer (one large allocation and its page faults
+         * less): mix() reads every channel at i before writing out[i], and float elements
+         * are never larger than the working type. */
+        float *res = chan[0];
         mix(path, chan, ch, w, m, res);
+        if (es > sizeof(float) && m > 0) {
+            float *shrunk = realloc(res, m * sizeof(float));
+            res = shrunk ? shrunk : res;
+        }
+        chan[0] = NULL;
         *out = res;
         *n_out = m;
-        res = NULL;
     }
     for (int c = 0; c < ch; c++)
         free(chan[c]);
     free(tmp);
-    free(res);
     af_resampler_destroy(rs);
     return rc;
 }

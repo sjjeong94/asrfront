@@ -22,13 +22,14 @@ static int cpu_has_avx2(void) {
     const int osxsave = (r[2] >> 27) & 1, avx = (r[2] >> 28) & 1;
     if (!osxsave || !avx || (_xgetbv(0) & 6) != 6) /* OS saves XMM and YMM state */
         return 0;
+    const int fma = (r[2] >> 12) & 1;
     __cpuidex(r, 7, 0);
-    return (r[1] >> 5) & 1;
+    return fma && ((r[1] >> 5) & 1);
 }
 #else
-static int cpu_has_avx2(void) {
+static int cpu_has_avx2(void) { /* AVX2 and FMA3: the avx2 table is built with -mfma */
     __builtin_cpu_init();
-    return __builtin_cpu_supports("avx2");
+    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
 }
 #endif
 #endif

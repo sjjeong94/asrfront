@@ -8,6 +8,7 @@
  * compilers (MSVC) use W = 1 (plain floats), which they may auto-vectorize; defining
  * AF_NO_VECTOR_EXT forces that path (the "scalar" table, built everywhere for tests).
  */
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -491,7 +492,62 @@ static void whisper_normalize(float *x, size_t n) {
         x[i] = ((x[i] > floor_v ? x[i] : floor_v) + 4.0f) * 0.25f;
 }
 
+/* ---------------------------------------------------------------------------------- */
+/* Resampler dot product (docs/load.md, float path)                                   */
+/* ---------------------------------------------------------------------------------- */
+
+/* 8 accumulators fed with fused multiply-adds, then (a0+a4, a1+a5, a2+a6, a3+a7) and
+ * pairwise sums: ffmpeg's AVX2/FMA3 kernel. fmaf() is correctly rounded, so this is the same
+ * in every build; with -mfma (the avx2 table) the lane loop becomes one vfmadd per 8 taps. */
+#if defined(__AVX__) && defined(__FMA__)
+#include <immintrin.h>
+static float resample_dot(const float *h, const float *x, int width) {
+    __m256 acc = _mm256_setzero_ps();
+    for (int i = 0; i < width; i += 8)
+        acc = _mm256_fmadd_ps(_mm256_loadu_ps(h + i), _mm256_loadu_ps(x + i), acc);
+    __m128 s =
+        _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1)); /* a_l+a_l+4 */
+    __m128 t = _mm_add_ps(s, _mm_movehl_ps(s, s));                              /* s0+s2, s1+s3 */
+    return _mm_cvtss_f32(_mm_add_ss(t, _mm_shuffle_ps(t, t, 1)));               /* t0 + t1 */
+}
+
+static float reduce8(__m256 acc) {
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+    __m128 t = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    return _mm_cvtss_f32(_mm_add_ss(t, _mm_shuffle_ps(t, t, 1)));
+}
+
+static void resample_dot4(const float *const *h, const float *const *x, int width, float *out) {
+    __m256 a0 = _mm256_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
+    for (int i = 0; i < width; i += 8) {
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(h[0] + i), _mm256_loadu_ps(x[0] + i), a0);
+        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(h[1] + i), _mm256_loadu_ps(x[1] + i), a1);
+        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(h[2] + i), _mm256_loadu_ps(x[2] + i), a2);
+        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(h[3] + i), _mm256_loadu_ps(x[3] + i), a3);
+    }
+    out[0] = reduce8(a0);
+    out[1] = reduce8(a1);
+    out[2] = reduce8(a2);
+    out[3] = reduce8(a3);
+}
+#else
+static float resample_dot(const float *h, const float *x, int width) {
+    float acc[8] = {0};
+    for (int i = 0; i < width; i += 8)
+        for (int l = 0; l < 8; l++)
+            acc[l] = fmaf(h[i + l], x[i + l], acc[l]);
+    float s0 = acc[0] + acc[4], s1 = acc[1] + acc[5], s2 = acc[2] + acc[6], s3 = acc[3] + acc[7];
+    float t0 = s0 + s2, t1 = s1 + s3;
+    return t0 + t1;
+}
+
+static void resample_dot4(const float *const *h, const float *const *x, int width, float *out) {
+    for (int j = 0; j < 4; j++)
+        out[j] = resample_dot(h[j], x[j], width);
+}
+#endif
+
 const af_kernels AF_CAT(af_kernels, AF_ISA) = {
-    AF_STR(AF_ISA), rfft_power, gather_packed, gather_scaled,     mel,
-    log10_floor,    log_floor,  kaldi_prep,    whisper_normalize,
+    AF_STR(AF_ISA), rfft_power, gather_packed,     gather_scaled, mel,           log10_floor,
+    log_floor,      kaldi_prep, whisper_normalize, resample_dot,  resample_dot4,
 };

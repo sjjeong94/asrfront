@@ -147,6 +147,33 @@ Even the plain-C `scalar` build is ~2x faster than the torch reference for Whisp
 (`bench/bench_fft.c`) needs ~0.98 µs per 400-point frame, i.e. 2.9 ms per 30 s for the FFT
 alone, versus ~0.37 ms in the AVX2 kernels.
 
+## 6. Audio loading
+
+`asrfront.load` (section [5] of `bench/compare.py`, needs `--group load`): 30 s of speech
+(jfk.wav looped) re-encoded by ffmpeg, decoded to 16 kHz mono float32, single thread, best of
+N runs. "whisper.load_audio" is its ffmpeg command line run as a subprocess (what openai-whisper
+does, including process start-up); `librosa.load(sr=16000)` uses soundfile + soxr_hq.
+
+| File | asrfront | whisper.load_audio | librosa.load |
+|---|---|---|---|
+| WAV 16 kHz mono | **0.32 ms** | 10.4 ms (33x) | 2.5 ms (8.0x) |
+| WAV 44.1 kHz stereo | **14.0 ms** | 35.7 ms (2.5x) | 31.4 ms (2.2x) |
+| WAV 48 kHz mono | **3.9 ms** | 19.1 ms (4.9x) | 8.4 ms (2.2x) |
+| WAV 8 kHz mono | 2.3 ms | 8.6 ms (3.8x) | **1.8 ms** (0.8x) |
+| FLAC 44.1 kHz stereo | 15.9 ms | 15.1 ms (1.0x) | 35.4 ms (2.2x) |
+| MP3 44.1 kHz stereo | **24.8 ms** | 38.3 ms (1.5x) | 33.5 ms (1.4x) |
+
+- Resampling dominates. The float path must reproduce ffmpeg's arithmetic exactly (8 FMA
+  accumulators per output, docs/load.md), so it cannot use a cheaper filter: per output it is a
+  92-tap (44.1 kHz) / 100-tap (48 kHz) dot product, ~7 ns per output sample on the AVX2+FMA3
+  kernel (4 outputs interleaved; the bank of 160 phases × 96 floats competes with the input
+  stream for L1). soxr upsampling from 8 kHz is faster.
+- The `generic` kernel calls libm `fmaf` per tap on x86-64 without FMA3 and is ~7x slower
+  for resampled input (e.g. 106 ms for 44.1 kHz stereo); on aarch64 `fmaf` is a single
+  instruction.
+- Large output buffers are dominated by page faults on WSL2; the loader reuses one channel
+  buffer for its output to keep the number of fresh allocations low.
+
 ## Where the time goes
 
 Per-stage breakdown of the AVX2 kernels for 3000 frames (`bench/bench_frontend.c`):
@@ -168,6 +195,11 @@ whole-spectrogram normalization pass for Whisper.
 |---|---|---|
 | M4/M5: scalar, one frame at a time, libm log | 5.8 ms | 5.2 ms |
 | M7: 8-frame SIMD kernels, AVX2 dispatch, vectorized log | 0.90 ms | 1.37 ms |
+
+| Milestone | load: WAV 44.1 kHz stereo, 33 s |
+|---|---|
+| M9.3: scalar resampler, libm `fmaf` per tap | 86 ms |
+| M9.5: AVX2+FMA3 kernel, 4 outputs at a time, fewer allocations | 14 ms |
 
 ## Caveats
 

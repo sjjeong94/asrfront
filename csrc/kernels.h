@@ -4,8 +4,8 @@
  * lanes, so they vectorize with any SIMD width.
  *
  * kernels_impl.c is compiled once per ISA (baseline, and AVX2 on x86-64); the table
- * is picked at runtime. The kernels use no FMA and the same operation order in every
- * build, so all variants produce bit-identical results.
+ * is picked at runtime. The kernels use no FMA (except explicit fmaf() in resample_dot) and
+ * the same operation order in every build, so all variants produce bit-identical results.
  */
 #ifndef ASRFRONT_KERNELS_H
 #define ASRFRONT_KERNELS_H
@@ -50,6 +50,14 @@ typedef struct af_kernels {
 
     /* Whisper dynamic range + scale: x = (max(x, max(x) - 8) + 4) / 4, in place. */
     void (*whisper_normalize)(float *x, size_t n);
+
+    /* Resampler float path: sum h[i] * x[i] over i < width (a multiple of 8) with 8 FMA
+     * accumulators and a fixed reduction tree (docs/load.md). The only kernel that uses FMA,
+     * through fmaf(), which is correctly rounded: identical in every build. */
+    float (*resample_dot)(const float *h, const float *x, int width);
+    /* Four independent resample_dot()s at once (hides the FMA latency): out[j] =
+     * resample_dot(h[j], x[j], width), bit for bit. */
+    void (*resample_dot4)(const float *const *h, const float *const *x, int width, float *out);
 } af_kernels;
 
 /* Best table for this CPU. ASRFRONT_KERNELS=generic forces the baseline build,
