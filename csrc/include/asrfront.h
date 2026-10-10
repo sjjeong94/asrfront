@@ -23,9 +23,12 @@ extern "C" {
 
 enum {
     AF_OK = 0,
-    AF_EINVAL = -1,   /* invalid argument / config */
-    AF_ENOMEM = -2,   /* allocation failure */
-    AF_ENOTIMPL = -3, /* not implemented yet */
+    AF_EINVAL = -1,       /* invalid argument / config */
+    AF_ENOMEM = -2,       /* allocation failure */
+    AF_ENOTIMPL = -3,     /* not implemented yet */
+    AF_EUNSUPPORTED = -4, /* unsupported file format / codec / sample rate */
+    AF_EIO = -5,          /* file could not be opened or read */
+    AF_ECORRUPT = -6,     /* malformed or truncated file */
 };
 
 const char *af_version(void);
@@ -92,6 +95,29 @@ int af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, 
 
 /* Raw kaldi fbank without LFR/CMVN. out: (raw_frames, n_mels) float32. */
 int af_sensevoice_fbank_raw(af_sensevoice *h, const float *audio, size_t n_samples, float *out);
+
+/* ------------------------------------------------------------------------ */
+/* Audio loading (16 kHz mono float32, as whisper's ffmpeg-based load_audio) */
+/* ------------------------------------------------------------------------ */
+
+/* How headerless (raw) PCM is treated. Raw PCM is always s16le, 16 kHz, mono. */
+typedef enum {
+    AF_RAW_AUTO = 0,  /* container if its header is recognized, else raw PCM (bytes input) */
+    AF_RAW_NEVER = 1, /* container only, else AF_EUNSUPPORTED (path without .pcm/.raw) */
+    AF_RAW_FORCE = 2  /* always raw PCM (.pcm/.raw path) */
+} af_raw_mode;
+
+/* Decode an in-memory audio file (WAV; raw PCM per `raw`) to 16 kHz mono float32,
+ * matching `ffmpeg -i FILE -f s16le -ac 1 -ar 16000` / 32768 (see docs/load.md).
+ * On success *out is allocated by the library (release with af_audio_free) and
+ * *n_samples is set; on error *out is NULL. */
+int af_load_memory(const void *buf, size_t size, af_raw_mode raw, float **out, size_t *n_samples);
+
+/* Same for a file (UTF-8 path). `.pcm` / `.raw` extensions select AF_RAW_FORCE,
+ * anything else AF_RAW_NEVER. */
+int af_load_file(const char *path_utf8, float **out, size_t *n_samples);
+
+void af_audio_free(float *p);
 
 #ifdef __cplusplus
 }

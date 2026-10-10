@@ -15,6 +15,12 @@ const char *af_strerror(int err) {
         return "out of memory";
     case AF_ENOTIMPL:
         return "not implemented";
+    case AF_EUNSUPPORTED:
+        return "unsupported audio format";
+    case AF_EIO:
+        return "cannot read file";
+    case AF_ECORRUPT:
+        return "malformed or truncated audio file";
     default:
         return "unknown error";
     }

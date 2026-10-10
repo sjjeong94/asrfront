@@ -27,7 +27,9 @@ function(asrfront_c_options target)
   if(MSVC)
     target_compile_options(${target} PRIVATE /W4)
   else()
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
+    # No FMA contraction: results must not depend on the compiler or target (explicit fmaf()
+    # calls, where wanted, are unaffected).
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wshadow -ffp-contract=off)
   endif()
 endfunction()
 
@@ -55,10 +57,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$")
 endif()
 
 add_library(asrfront_core STATIC
+  csrc/audio_load.c
   csrc/common.c
   csrc/fft.c
   csrc/kernels.c
   csrc/melbank.c
+  csrc/remix.c
+  csrc/wav.c
   csrc/whisper.c
   csrc/sensevoice.c
   ${ASRFRONT_KERNEL_OBJECTS}
@@ -93,7 +98,7 @@ endif()
 # ---------------------------------------------------------------------------
 if(ASRFRONT_BUILD_TESTS)
   enable_testing()
-  foreach(t test_api test_fft)
+  foreach(t test_api test_fft test_load)
     add_executable(${t} tests/c/${t}.c)
     target_include_directories(${t} PRIVATE csrc)  # internal headers
     target_link_libraries(${t} PRIVATE asrfront_core)

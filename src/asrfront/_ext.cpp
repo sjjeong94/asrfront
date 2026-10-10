@@ -22,6 +22,8 @@ using Audio = nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::device::cp
 using Vec = nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Out2D = nb::ndarray<nb::numpy, float, nb::ndim<2>, nb::c_contig>;
 using OutArg = std::optional<nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu>>;
+using Bytes = nb::ndarray<const uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using Out1D = nb::ndarray<nb::numpy, float, nb::ndim<1>, nb::c_contig>;
 
 static void check(int rc) {
     switch (rc) {
@@ -33,6 +35,12 @@ static void check(int rc) {
         throw std::bad_alloc();
     case AF_ENOTIMPL:
         PyErr_SetString(PyExc_NotImplementedError, "asrfront: not implemented yet");
+        throw nb::python_error();
+    case AF_EUNSUPPORTED:
+    case AF_ECORRUPT:
+        throw nb::value_error(af_strerror(rc));
+    case AF_EIO:
+        PyErr_SetString(PyExc_OSError, af_strerror(rc));
         throw nb::python_error();
     default:
         throw std::runtime_error(af_strerror(rc));
@@ -178,6 +186,25 @@ NB_MODULE(_ext, m) {
             return res;
         },
         "n_mels"_a, "Dense (n_mels, 257) kaldi filters used by the sensevoice frontend (testing).");
+
+    m.def(
+        "load_memory",
+        [](Bytes data, int raw) {
+            float *buf = nullptr;
+            size_t n = 0;
+            int rc;
+            {
+                nb::gil_scoped_release release;
+                rc = af_load_memory(data.data(), data.shape(0), (af_raw_mode)raw, &buf, &n);
+            }
+            check(rc);
+            nb::capsule owner(buf,
+                              [](void *p) noexcept { af_audio_free(static_cast<float *>(p)); });
+            return Out1D(buf, {n}, owner);
+        },
+        "data"_a, "raw"_a,
+        "Decode an in-memory audio file to 16 kHz mono float32. raw: 0 auto, 1 never, 2 force "
+        "(raw = headerless s16le 16 kHz mono).");
 
     nb::class_<Whisper>(m, "WhisperFrontend")
         .def(nb::init<int, bool, int>(), "n_mels"_a = 80, "pad_or_trim"_a = true, "n_threads"_a = 1)

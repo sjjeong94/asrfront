@@ -55,6 +55,16 @@ float32) (E).
 Final conversion (all paths): `s16 = clamp(lrint(v · 32768), −32768, 32767)` where `lrint`
 rounds half to even (float/double paths), or the int16 path's own rounding (below) (E).
 
+Out-of-range and non-finite values (E) — only reachable with float/double input beyond
+±65536 (×32768 ≥ 2³¹), NaN or ±inf:
+
+- **double path**: always ffmpeg's scalar conversion — a 64-bit `lrint` (NaN / beyond ±2⁶³ give
+  INT64_MIN), truncated to its low 32 bits, then clamped. So NaN/inf → 0, −10⁵ → +32767.
+  Reproduced exactly.
+- **float path**: ffmpeg converts most samples with SIMD (NaN or beyond int32 → −32768) but the
+  last few samples of each internal block with the scalar rule above, so the result depends on
+  the sample's position. asrfront always uses the SIMD rule (−32768). Documented deviation.
+
 ## Downmix (`-ac 1`)
 
 ### Coefficients (E)
@@ -182,6 +192,29 @@ asrfront uses (E):
 When the lengths differ, all common samples are still identical; only the last sample is
 missing/extra. Very short inputs behave differently in ffmpeg (e.g. at 48 kHz fewer than 67
 input samples give **no output at all**); asrfront applies the formula (deviation, < 2 ms of audio).
+
+## Containers
+
+### WAV (E; checked against ffmpeg in `tests/python/test_load.py`)
+
+- `RIFF`, `RF64` and `BW64` headers (RF64: 64-bit data size from the `ds64` chunk); the RIFF size
+  field is ignored. Chunks are word aligned (odd sizes are followed by a pad byte); unknown chunks
+  (`LIST`, `fact`, …) before or after `data` are skipped. `data` before `fmt ` is an error.
+- Codecs: PCM u8 / s16 / s24 / s32, IEEE float 32 / 64, A-law and µ-law (G.711, decoded to s16),
+  each also inside `WAVE_FORMAT_EXTENSIBLE` (sub-format GUID). Other codecs (e.g. MP3-in-WAV,
+  ADPCM) and other bit depths are rejected.
+- A `data` size of 0, 0xFFFFFFFF, or larger than the file means "until the end of the file"
+  (streamed or truncated recordings); a partial last frame is dropped.
+- Channel layout: the extensible channel mask when it names exactly as many positions as there
+  are channels, otherwise (no mask, mask with too few / too many / unknown positions) the
+  default layout for the channel count. Up to 18 channels with a mask, 8 without.
+
+### Raw PCM
+
+Headerless s16le, 16 kHz, mono (`int16 / 32768`); an odd trailing byte is dropped. Selected by
+a `.pcm` / `.raw` file extension, or for bytes input without a recognized header (see
+`plan.md` §7.3 for the detection rules; MP3 sync detection requires two consecutive valid
+Layer III frame headers so that raw PCM is never taken for MP3).
 
 ## Summary of accuracy targets (M9)
 

@@ -536,7 +536,18 @@ def ffmpeg_load_ref(
         return np.clip(v, -32768, 32767).astype(np.int16)
 
     def to_s16(v: np.ndarray) -> np.ndarray:  # float/double -> s16, round half to even
-        return sat(np.rint(v.astype(np.float64) * 32768.0))
+        with np.errstate(invalid="ignore", over="ignore"):
+            r = np.rint(v.astype(np.float64) * 32768.0)
+            if v.dtype == np.float32:  # SIMD conversion: NaN / outside int32 -> -32768
+                ok = (r >= -(2.0**31)) & (r < 2.0**31)
+                return np.where(ok, np.clip(np.nan_to_num(r), -32768, 32767), -32768).astype(
+                    np.int16
+                )
+            # scalar conversion: 64-bit lrint (NaN / out of range -> INT64_MIN), low 32 bits
+            ok = (r >= -(2.0**63)) & (r < 2.0**63)
+            l64 = np.where(ok, np.nan_to_num(r), 0).astype(np.int64)
+            l64 = np.where(ok, l64, np.iinfo(np.int64).min)
+            return sat(l64.astype(np.int32).astype(np.int64))
 
     int_path = sample_fmt == "u8" or (sample_fmt == "s16" and not resample)
     if int_path:

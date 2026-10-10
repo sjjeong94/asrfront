@@ -290,7 +290,7 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 
 **Total estimate: ~12–13 working days** (all milestones implemented; first GitHub CI run pending)
 
-### M9. Audio loading (~6.5 days) — in progress (M9.1 done)
+### M9. Audio loading (~6.5 days) — in progress (M9.1, M9.2 done)
 - WAV / raw PCM / FLAC / MP3 → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
 
 ---
@@ -461,6 +461,23 @@ This replaces the project's "no FMA" rule *for this kernel*: `fmaf` is correctly
 standard, so hardware FMA (AVX2+FMA3 variant) and the libm fallback (generic/scalar variants)
 still give bit-identical results; the scalar fallback is slower on CPUs without FMA.
 
+#### 7.2.3 M9.2 results
+
+- C: `csrc/wav.c` (RIFF/RF64/BW64, PCM u8–s32, float, A-law/µ-law, extensible masks, damaged
+  data sizes), `csrc/remix.c` (layouts, downmix, the three arithmetic paths, s16 conversion),
+  `csrc/audio_load.c` (detection, `af_load_memory` / `af_load_file` / `af_audio_free`), internal
+  header `csrc/audio.h`. New error codes `AF_EUNSUPPORTED`, `AF_EIO`, `AF_ECORRUPT`.
+  `-ffp-contract=off` added for all C code (no implicit FMA; explicit `fmaf` stays allowed).
+- Python: `asrfront.load(path | bytes)`, `asrfront.SAMPLE_RATE`; non-16 kHz files raise
+  `ValueError` until M9.3, FLAC/MP3 until M9.4.
+- Tests: `tests/c/test_load.c` (hand-made buffers, every truncation of a file);
+  `tests/python/test_load.py` (132 tests: 8 codecs × 1–8 channels, 18 named layouts × 3 codecs,
+  RF64, damaged/truncated files, mismatched masks, float specials, bytes == path, raw PCM, MP3
+  false-positive patterns, threads) — **bit-exact against whisper's ffmpeg command**.
+  Also 2·10⁶ random mutations of a WAV file under ASan/UBSan without findings.
+- Extra ffmpeg behavior found and specified: out-of-range / non-finite float samples (double path
+  reproduced; float path position-dependent in ffmpeg, asrfront uses the SIMD rule).
+
 ### 7.3 C design
 
 New files:
@@ -591,7 +608,7 @@ def load(source: str | os.PathLike[str] | bytes | bytearray | memoryview) -> np.
 | Step | Contents | Est. |
 |---|---|---|
 | M9.1 ✅ | Pin ffmpeg behavior per §7.2.1: probe-signal experiments first, swr source only for unexplained gaps (behavior notes only); write the `docs/load.md` spec; then write `ffmpeg_resample_ref` (Python) **from the spec** and confirm downmix/resample/rounding/length rules bit-exact vs. ffmpeg | 1.5 d |
-| M9.2 | WAV + raw PCM parser, downmix, s16 rounding, `af_load_memory/file` + format detection rules, Python `load(path | bytes)` (no resampling yet: non-16 kHz → `AF_EUNSUPPORTED` temporarily) | 1 d |
+| M9.2 ✅ | WAV + raw PCM parser, downmix, s16 rounding, `af_load_memory/file` + format detection rules, Python `load(path | bytes)` (no resampling yet: non-16 kHz → `AF_EUNSUPPORTED` temporarily) | 1 d |
 | M9.3 | Resampler **from `docs/load.md` + DSP literature only, swr source not consulted** (§7.2.1): s16 integer path + float path, exact length/delay handling; internal only (one-shot) | 1.5 d |
 | M9.4 | FLAC (dr_flac) + MP3 (dr_mp3, gapless trim) integration, strict MP3 sniffing | 1 d |
 | M9.5 | SIMD resampler kernels, benchmark vs. `whisper.load_audio` (ffmpeg subprocess) / `librosa.load`, end-to-end SenseVoice check, ASan + fuzz, README/docs, wheel size check | 1.5 d |
