@@ -1,0 +1,180 @@
+# Benchmark
+
+Speed of `asrfront` against the reference implementations of each model's frontend.
+Accuracy is covered in [whisper.md](whisper.md#accuracy) and
+[sensevoice.md](sensevoice.md#accuracy); every implementation compared here produces the
+same features up to float32 rounding.
+
+## Summary
+
+30 s of 16 kHz speech, single thread, median of 3 runs:
+
+| Task | asrfront | Reference | Speed-up |
+|---|---|---|---|
+| Whisper log-mel `(80, 3000)` | **0.90 ms** | openai-whisper `log_mel_spectrogram` (torch) 8.28 ms | **9.2x** |
+| | | librosa STFT + whisper mel filters 6.79 ms | 7.5x |
+| SenseVoice features `(500, 560)` | **1.37 ms** | FunASR `WavFrontend` (torchaudio + LFR + CMVN) 11.95 ms | **8.7x** |
+| kaldi fbank only `(2998, 80)` | **1.31 ms** | `torchaudio.compliance.kaldi.fbank` 10.89 ms | 8.3x |
+| | | kaldi-native-fbank (Python API) 23.25 ms | 17.7x |
+
+Even when torch uses all 16 threads and asrfront only one, asrfront is ~4.5x faster.
+At 0.9 ms per 30 s, a single core computes Whisper features ~33 000x faster than real time.
+
+## Environment
+
+| | |
+|---|---|
+| CPU | Intel Core i5-14400F (6 P-cores with HT + 4 E-cores, 16 threads; 20 MB L3) |
+| OS | Ubuntu 24.04 on WSL2 (kernel 6.18.33.2-microsoft-standard-WSL2) |
+| Compiler | GCC 13.3.0, `-O3` (CMake Release), no `-march=native` |
+| asrfront | 0.1.0, AVX2 kernels (runtime-selected) |
+| Python | 3.12.15 |
+| Reference libraries | torch 2.14.1+cpu, torchaudio 2.11.0+cpu, librosa 1.0.0, numpy 2.5.3, kaldi-native-fbank 1.22.3 |
+
+## Method
+
+```bash
+uv run --group ref --group bench python bench/compare.py --json results.json
+```
+
+- Each measurement is the **best** of ≥ 20 calls (and ≥ 0.5 s of calls) after one warm-up
+  call; the tables report the **median of 3 such runs**, with the range of the 3 runs where
+  useful. Run-to-run variation is about ±5–10 %.
+- Input: the JFK speech sample from the test data, tiled to the required length, float32.
+- All timings are wall-clock from Python and include the Python call, input conversion and
+  allocation of the output array — i.e. what a user of each library pays per call.
+- "Single thread": `torch.set_num_threads(1)`; numpy/librosa run on one core for these
+  operations. asrfront's single-input functions are always single-threaded.
+- Reference pipelines (in `bench/compare.py`, built on `tests/python/reference.py`):
+  - **openai-whisper**: a verbatim port of `whisper.audio.log_mel_spectrogram` with
+    `pad_or_trim` (`torch.stft` + mel matmul + log10/clamp/scale), using whisper's
+    `mel_filters.npz`.
+  - **librosa**: `librosa.stft(n_fft=400, hop_length=160, window="hann")`, power, the same
+    mel filters, and whisper's log/clamp/scale in numpy.
+  - **FunASR WavFrontend**: `kaldi.fbank` on the ×32768 waveform (hamming, dither 0,
+    energy_floor 0), FunASR's `apply_lfr` loop and `apply_cmvn` — the per-utterance body of
+    `WavFrontend.forward`.
+  - **kaldi-native-fbank**: `OnlineFbank` with the same options through its Python API,
+    including the list conversion it needs and the per-frame `get_frame` calls.
+
+## 1. 30 s, single thread
+
+| | median | range (3 runs) | vs. asrfront |
+|---|---|---|---|
+| **Whisper log-mel** | | | |
+| asrfront (AVX2) | 0.90 ms | 0.87 – 0.94 | 1.0x |
+| openai-whisper (torch) | 8.28 ms | 8.07 – 8.40 | 9.2x |
+| librosa + numpy | 6.79 ms | 6.49 – 6.80 | 7.5x |
+| **SenseVoice features (fbank + LFR + CMVN)** | | | |
+| asrfront (AVX2) | 1.37 ms | 1.31 – 1.40 | 1.0x |
+| FunASR WavFrontend | 11.95 ms | 11.79 – 12.04 | 8.7x |
+| **kaldi fbank only** | | | |
+| asrfront `fbank_raw` | 1.31 ms | 1.27 – 1.35 | 1.0x |
+| torchaudio `kaldi.fbank` | 10.89 ms | 10.62 – 11.53 | 8.3x |
+| kaldi-native-fbank (Python API) | 23.25 ms | 22.76 – 23.87 | 17.7x |
+
+LFR + CMVN add only ~0.06 ms on top of the raw fbank in asrfront; in FunASR the Python LFR
+loop costs ~1 ms. The kaldi-native-fbank number is dominated by its Python interface
+(`tolist()` of 480 000 samples and 2998 `get_frame` calls), not by its C++ core.
+
+## 2. 30 s, reference libraries with 16 threads
+
+Same inputs, `torch.set_num_threads(16)`; asrfront still single-threaded.
+
+| | median | vs. asrfront |
+|---|---|---|
+| asrfront `whisper.log_mel` (1 thread) | 0.90 ms | |
+| openai-whisper (torch, 16 threads) | 4.05 ms | 4.5x |
+| asrfront `sensevoice.fbank` (1 thread) | 1.32 ms | |
+| FunASR WavFrontend (torch, 16 threads) | 5.87 ms | 4.4x |
+
+Torch gains ~2x from 16 threads on a single 30 s input; asrfront does not parallelize a
+single input (not worth it at < 1.5 ms) and parallelizes batches instead (section 4).
+
+## 3. Input length
+
+Single thread; Whisper with `pad_or_trim=False` so that the work scales with the input.
+
+| Length | asrfront whisper | openai-whisper (torch) | speed-up | asrfront sensevoice | FunASR WavFrontend | speed-up |
+|---|---|---|---|---|---|---|
+| 1 s | 0.04 ms | 0.37 ms | ~9x | 0.05 ms | 0.35 ms | ~7x |
+| 5 s | 0.15 ms | 0.90 ms | 6.0x | 0.23 ms | 1.28 ms | 5.6x |
+| 10 s | 0.30 ms | 1.58 ms | 5.3x | 0.45 ms | 2.49 ms | 5.5x |
+| 30 s | 0.90 ms | 7.86 ms | 8.7x | 1.36 ms | 11.82 ms | 8.7x |
+| 120 s | 3.76 ms | 28.81 ms | 7.7x | 5.54 ms | 51.55 ms | 9.3x |
+
+- asrfront scales linearly: ~0.03 ms (Whisper) / ~0.045 ms (SenseVoice) per second of audio,
+  with only a few µs of fixed per-call overhead.
+- The references have a fixed per-call overhead (~0.3 ms) that dominates short inputs, and
+  their cost grows faster than linearly between 10 s and 30 s (cache effects in the batched
+  STFT / matmul), which is why the speed-up is lowest around 5–10 s.
+
+## 4. Batches and threads
+
+`whisper.log_mel_batch` / `sensevoice.fbank_batch` on 32 × 30 s (= 16 minutes of audio),
+time for the whole batch:
+
+| `n_threads` | whisper | scaling | sensevoice | scaling |
+|---|---|---|---|---|
+| 1 | 29.39 ms | 1.0x | 46.47 ms | 1.0x |
+| 2 | 15.90 ms | 1.8x | 26.54 ms | 1.8x |
+| 4 | 9.31 ms | 3.2x | 15.05 ms | 3.1x |
+| 8 | 6.76 ms | 4.3x | 11.19 ms | 4.2x |
+| 16 | 7.59 ms | 3.9x | 11.80 ms | 3.9x |
+
+- Best throughput: 32 Whisper inputs in 6.8 ms with 8 threads, i.e. ~0.21 ms per 30 s
+  input (~140 000x real time).
+- Scaling flattens after 4–8 threads and 16 threads is slightly slower than 8. Each item
+  takes < 1 ms, so the batch is short enough that thread-pool overhead, the 4 E-cores and
+  hyper-threads (16 threads ≠ 16 full cores), and memory traffic (≈ 61 MB in + 31 MB out per
+  whisper batch) all show; this was not profiled further. `n_threads` around the number of
+  performance cores is a good default for this CPU.
+
+## 5. Kernel variants
+
+C-level timing (`bench/bench_frontend.c`, no Python), 30 s, median of 3 runs. The variant is
+chosen at runtime; `ASRFRONT_KERNELS=generic|scalar` forces the slower ones. All three give
+bit-identical output.
+
+| Variant | Used when | whisper | sensevoice |
+|---|---|---|---|
+| `avx2` | x86-64 with AVX2 (default here) | 0.99 ms | 1.46 ms |
+| `generic` | x86-64 without AVX2 (SSE2), aarch64 (NEON) | 1.68 ms | 2.04 ms |
+| `scalar` | compilers without GCC/Clang vector extensions (MSVC) | 4.01 ms | 5.25 ms |
+
+Even the plain-C `scalar` build is ~2x faster than the torch reference for Whisper and
+~2.3x for SenseVoice. For reference, the original one-frame-at-a-time scalar FFT
+(`bench/bench_fft.c`) needs ~0.98 µs per 400-point frame, i.e. 2.9 ms per 30 s for the FFT
+alone, versus ~0.37 ms in the AVX2 kernels.
+
+## Where the time goes
+
+Per-stage breakdown of the AVX2 kernels for 3000 frames (`bench/bench_frontend.c`):
+
+| Stage | Whisper (400-pt FFT) | SenseVoice (512-pt FFT) |
+|---|---|---|
+| real FFT + power | ~0.37 ms | ~0.43 ms |
+| mel filters | ~0.08 ms | ~0.10 ms |
+| log | ~0.12 ms | ~0.12 ms |
+| framing / preprocessing / output (remainder) | ~0.3–0.4 ms | ~0.6–0.8 ms |
+
+The FFT is about 40 % (Whisper) / 30 % (SenseVoice) of the total; the remaining time is spread over framing (gathering and
+transposing frames, Kaldi's DC removal / pre-emphasis), writing the output layout, and the
+whole-spectrogram normalization pass for Whisper.
+
+## History
+
+| Milestone | whisper 30 s | sensevoice 30 s |
+|---|---|---|
+| M4/M5: scalar, one frame at a time, libm log | 5.8 ms | 5.2 ms |
+| M7: 8-frame SIMD kernels, AVX2 dispatch, vectorized log | 0.90 ms | 1.37 ms |
+
+## Caveats
+
+- WSL2 on a desktop CPU with turbo boost; absolute numbers vary by ±5–10 % between runs and
+  will differ on other machines. Ratios are more stable than absolute times.
+- Only x86-64 with AVX2 was measured. aarch64 uses the `generic` (NEON) kernels; its speed was
+  not measured.
+- The reference pipelines are re-implementations of the libraries' code paths (verified to
+  produce the same features, see `tests/python/test_reference.py`), not the full
+  `openai-whisper` / `funasr` packages, which add file decoding and model-specific glue.

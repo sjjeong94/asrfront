@@ -75,6 +75,9 @@ All native calls release the GIL. The `*_batch` functions spread items over a th
 | SenseVoice fbank + LFR + CMVN | 1.3–1.4 ms | FunASR `WavFrontend` (torchaudio) 12–14 ms | ~9–10x |
 | kaldi fbank only | 1.3 ms | `torchaudio.compliance.kaldi.fbank` 11–12 ms | ~9x |
 
+Full results (thread scaling, input lengths, kernel variants, methodology):
+[`docs/benchmark.md`](docs/benchmark.md).
+
 Kernels process 8 frames at a time in SIMD lanes. On x86-64 an AVX2 build is selected at
 runtime when available (`asrfront._ext.kernel_isa()`); `ASRFRONT_KERNELS=generic` forces the
 baseline build. All variants give bit-identical results. Batch of 32 × 30 s: ~7.5 ms with
