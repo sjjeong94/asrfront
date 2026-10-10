@@ -52,7 +52,9 @@ typedef struct af_kernels {
     void (*whisper_normalize)(float *x, size_t n);
 } af_kernels;
 
-/* Best table for this CPU. ASRFRONT_KERNELS=generic forces the baseline build. */
+/* Best table for this CPU. ASRFRONT_KERNELS=generic forces the baseline build,
+ * ASRFRONT_KERNELS=scalar the plain-C build without vector extensions (the code path
+ * MSVC compiles; used to test it on every platform). */
 const af_kernels *af_kernels_select(void);
 
 #endif /* ASRFRONT_KERNELS_H */

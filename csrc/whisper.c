@@ -86,12 +86,12 @@ size_t af_whisper_out_frames(const af_whisper *h, size_t n_samples) {
  */
 static const float *frame_src(const float *audio, size_t n_in, size_t n_virt, size_t t,
                               float *edge) {
-    const long i0 = (long)(t * WHISPER_HOP) - WHISPER_PAD;
+    const ptrdiff_t i0 = (ptrdiff_t)(t * WHISPER_HOP) - WHISPER_PAD;
     if (i0 >= 0 && (size_t)i0 + WHISPER_N_FFT <= n_in)
         return audio + i0;
-    const long last = (long)n_virt - 1;
+    const ptrdiff_t last = (ptrdiff_t)n_virt - 1;
     for (int k = 0; k < WHISPER_N_FFT; k++) {
-        long i = i0 + k;
+        ptrdiff_t i = i0 + k;
         if (i < 0)
             i = -i;
         else if (i > last)

@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install tools (no native build needed)
+        run: uv sync --no-install-project
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
+      - run: uv run --no-sync mypy --strict src/asrfront
+      - name: clang-format
+        run: >-
+          uv run --no-sync clang-format --dry-run --Werror
+          csrc/*.c csrc/*.h csrc/include/*.h tests/c/*.c bench/*.c src/asrfront/_ext.cpp
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
+        python: ["3.9", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Build and install (editable)
+        run: uv sync
+      - name: Python tests
+        run: uv run --no-sync pytest -q
+      - name: Python tests with the plain-C kernels (MSVC code path)
+        run: uv run --no-sync pytest -q tests/python/test_whisper.py tests/python/test_sensevoice.py
+        env:
+          ASRFRONT_KERNELS: scalar
+      - name: C tests
+        run: |
+          uv run --no-sync cmake -S . -B build/ctest -DASRFRONT_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+          uv run --no-sync cmake --build build/ctest --config Release
+          uv run --no-sync ctest --test-dir build/ctest -C Release --output-on-failure
+
+  reference:
+    # Compare against the original float32 libraries (torch, torchaudio).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --group ref
+      - run: uv run --no-sync pytest -q
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    env:
+      SAN_FLAGS: -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: C tests under ASan/UBSan
+        run: |
+          uv sync --no-install-project
+          uv run --no-sync cmake -S . -B build/asan -G Ninja -DASRFRONT_BUILD_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS="$SAN_FLAGS"
+          uv run --no-sync cmake --build build/asan
+          uv run --no-sync ctest --test-dir build/asan --output-on-failure
+      - name: Python tests under ASan/UBSan
+        run: |
+          uv pip install --no-build-isolation scikit-build-core nanobind
+          uv pip install --no-build-isolation -e . \
+            -C cmake.build-type=RelWithDebInfo -C build-dir=build/asan-py \
+            -C "cmake.define.CMAKE_C_FLAGS=$SAN_FLAGS" -C "cmake.define.CMAKE_CXX_FLAGS=$SAN_FLAGS" \
+            -C "cmake.define.CMAKE_SHARED_LINKER_FLAGS=-fsanitize=address,undefined"
+          LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libubsan.so)" \
+          ASAN_OPTIONS=detect_leaks=0 \
+            .venv/bin/python -m pytest -q

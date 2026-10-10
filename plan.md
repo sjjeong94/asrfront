@@ -273,12 +273,21 @@ void af_sensevoice_destroy(af_sensevoice *h);
 
 Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success criterion 2 is met against torch (≥ 5x); against librosa it is ~7.7x, short of the 10x goal.
 
-### M8. Packaging & CI (1 day)
-- [ ] GitHub Actions: build & test on Linux (x86_64/aarch64), macOS (arm64/x86_64), Windows
-- [ ] Build wheels with cibuildwheel; use nanobind stable ABI (`abi3`, Python ≥ 3.12) to minimize wheel count
-- [ ] Add install instructions, benchmark results and accuracy table to README
+### M8. Packaging & CI (1 day) — done (CI not yet run on GitHub)
+- [x] GitHub Actions (`.github/workflows/ci.yml`, checked with actionlint):
+  - `lint`: ruff check/format, `mypy --strict`, clang-format
+  - `test`: Linux x86_64 / aarch64, macOS arm64 / Intel, Windows × Python 3.9 / 3.13 — `uv sync`, pytest, pytest again with `ASRFRONT_KERNELS=scalar`, C tests via CMake/CTest
+  - `reference`: full suite with torch/torchaudio (`--group ref`)
+  - `sanitizers`: C tests and pytest against an ASan/UBSan build (both verified locally: all pass, extension instrumented)
+- [x] Wheels with cibuildwheel (`.github/workflows/wheels.yml`, config in `[tool.cibuildwheel]`): cp39–cp311 regular wheels + one **cp312-abi3** wheel per platform (nanobind `STABLE_ABI`, `wheel.py-api = "cp312"`; `abi3audit --strict` clean), manylinux x86_64/aarch64, macOS arm64/x86_64 (deployment target 10.15), Windows AMD64; sdist; PyPI trusted publishing on GitHub release (needs the `pypi` environment registered on PyPI)
+  - verified locally: `uv build` (sdist → wheel), fresh venvs: abi3 wheel on Python 3.13 and sdist build on Python 3.9 both pass the test suite
+- [x] README: install, usage, performance and accuracy tables; MIT `LICENSE`
+- Portability work done here:
+  - `long` → `ptrdiff_t` / `long long` for sample indices (32-bit `long` on Windows)
+  - third kernel variant **`scalar`** (no vector extensions = the code path MSVC compiles), built on every platform and selectable with `ASRFRONT_KERNELS=scalar`; bit-identical to the others (C + Python tests). Slower (whisper 3.8 ms / 30 s) but a correct fallback
+  - cross-compiled the C core with clang (zig) for aarch64-linux, arm64/x86_64-macOS and x86_64-windows-gnu without warnings. **Not verified here**: MSVC (no Windows SDK; the `cpuid` dispatch and `/arch:AVX2` build only run in CI), and actually running on macOS/ARM/Windows
 
-**Total estimate: ~12–13 working days**
+**Total estimate: ~12–13 working days** (all milestones implemented; first GitHub CI run pending)
 
 ---
 

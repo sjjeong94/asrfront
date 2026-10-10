@@ -38,6 +38,13 @@ target_compile_definitions(asrfront_kernels_generic PRIVATE AF_ISA=generic)
 asrfront_c_options(asrfront_kernels_generic)
 set(ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_kernels_generic>)
 
+# Plain-C variant (no vector extensions), i.e. the MSVC code path; selectable with
+# ASRFRONT_KERNELS=scalar so it is tested on every platform.
+add_library(asrfront_kernels_scalar OBJECT csrc/kernels_impl.c)
+target_compile_definitions(asrfront_kernels_scalar PRIVATE AF_ISA=scalar AF_NO_VECTOR_EXT=1)
+asrfront_c_options(asrfront_kernels_scalar)
+list(APPEND ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_kernels_scalar>)
+
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$")
   add_library(asrfront_kernels_avx2 OBJECT csrc/kernels_impl.c)
   target_compile_definitions(asrfront_kernels_avx2 PRIVATE AF_ISA=avx2)
@@ -71,9 +78,11 @@ if(ASRFRONT_BUILD_PYTHON)
   enable_language(CXX)
   set(CMAKE_CXX_STANDARD 17)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
-  find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module)
+  # SKBUILD_SABI_COMPONENT is "Development.SABIModule" when building a stable-ABI wheel.
+  find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module
+               ${SKBUILD_SABI_COMPONENT})
   find_package(nanobind CONFIG REQUIRED)
-  nanobind_add_module(_ext NB_STATIC src/asrfront/_ext.cpp)
+  nanobind_add_module(_ext STABLE_ABI NB_STATIC src/asrfront/_ext.cpp)
   target_include_directories(_ext PRIVATE csrc)  # internal headers (test hooks)
   target_link_libraries(_ext PRIVATE asrfront_core)
   install(TARGETS _ext LIBRARY DESTINATION asrfront)

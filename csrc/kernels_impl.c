@@ -5,7 +5,8 @@
  *
  * Kernels work on AF_VL lanes (frames) in chunks of the native vector width W: a GCC /
  * Clang vector-extension type of 8 floats with AVX, 4 otherwise (SSE2, NEON). Other
- * compilers use W = 1 (plain floats), which they may auto-vectorize.
+ * compilers (MSVC) use W = 1 (plain floats), which they may auto-vectorize; defining
+ * AF_NO_VECTOR_EXT forces that path (the "scalar" table, built everywhere for tests).
  */
 #include <stdint.h>
 #include <string.h>
@@ -26,7 +27,7 @@
 /* Native vectors                                                                     */
 /* ---------------------------------------------------------------------------------- */
 
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(AF_NO_VECTOR_EXT)
 #define AF_VEC_EXT 1
 #if defined(__AVX__)
 #define W 8

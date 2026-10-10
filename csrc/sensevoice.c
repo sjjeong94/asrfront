@@ -218,14 +218,14 @@ int af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, 
     }
     fbank_raw(h, audio, n_raw, h->raw);
 
-    const long m = h->cfg.lfr_m, n = h->cfg.lfr_n, left = (m - 1) / 2;
-    const long last = (long)n_raw - 1;
+    const ptrdiff_t m = h->cfg.lfr_m, n = h->cfg.lfr_n, left = (m - 1) / 2;
+    const ptrdiff_t last = (ptrdiff_t)n_raw - 1;
     const size_t dim = n_mels * (size_t)m;
     const float *shift = h->cfg.cmvn_shift, *scale = h->cfg.cmvn_scale;
     for (size_t i = 0; i < n_out; i++) {
         float *row = out + i * dim;
-        for (long j = 0; j < m; j++) {
-            long src = (long)i * n - left + j;
+        for (ptrdiff_t j = 0; j < m; j++) {
+            ptrdiff_t src = (ptrdiff_t)i * n - left + j;
             src = src < 0 ? 0 : (src > last ? last : src);
             memcpy(row + (size_t)j * n_mels, h->raw + (size_t)src * n_mels, n_mels * sizeof(float));
         }

@@ -169,14 +169,14 @@ int main(void) {
         test_size(sizes[i], 1e-6);
     test_invalid_sizes();
 
-    extern const af_kernels af_kernels_generic;
-    const af_kernels *tables[] = {&af_kernels_generic, af_kernels_select()};
-    for (int t = 0; t < 2; t++)
+    extern const af_kernels af_kernels_generic, af_kernels_scalar;
+    const af_kernels *tables[] = {&af_kernels_generic, &af_kernels_scalar, af_kernels_select()};
+    for (int t = 0; t < 3; t++)
         for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
             if (sizes[i] >= 4) /* the SoA kernel needs at least one butterfly stage */
                 test_soa_kernel(tables[t], sizes[i]);
-    printf("SoA kernels (%s, %s) match the scalar FFT bit for bit\n", tables[0]->name,
-           tables[1]->name);
+    printf("SoA kernels (%s, %s, %s) match the scalar FFT bit for bit\n", tables[0]->name,
+           tables[1]->name, tables[2]->name);
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

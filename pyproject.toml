@@ -1,14 +1,35 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.2"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "asrfront"
 version = "0.1.0"
 description = "Super-fast, dependency-free C frontends (log-mel, kaldi fbank) for Whisper and SenseVoice ASR models"
+readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [{ name = "sjjeong94" }]
+keywords = ["asr", "speech", "whisper", "sensevoice", "fbank", "mel-spectrogram", "kaldi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = ["numpy>=1.21"]
+
+[project.urls]
+Homepage = "https://github.com/sjjeong94/asrfront"
+Issues = "https://github.com/sjjeong94/asrfront/issues"
 
 [dependency-groups]
 bench = [
@@ -34,6 +55,20 @@ minimum-version = "build-system.requires"
 build-dir = "build/{wheel_tag}"
 cmake.build-type = "Release"
 wheel.packages = ["src/asrfront"]
+# Stable ABI: one cp312-abi3 wheel serves CPython 3.12+; older Pythons get regular wheels.
+wheel.py-api = "cp312"
+wheel.exclude = ["asrfront/_ext.cpp"]
+
+[tool.cibuildwheel]
+# cp39-cp311 regular wheels + cp312 abi3 (also used for 3.13+, tested via test-skip below).
+build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*"]
+skip = ["*-win32", "*_i686", "*-musllinux_*"]
+build-frontend = "build[uv]"
+test-requires = ["pytest"]
+test-command = "pytest {project}/tests/python -q"
+
+[tool.cibuildwheel.macos]
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.15" }
 
 [tool.uv]
 # `ref` holds the heavyweight reference implementations (torch, torchaudio) used only to

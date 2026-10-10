@@ -10,8 +10,11 @@ from asrfront import _ext
 from audio_signals import SIGNAL_NAMES
 
 
-def test_kernel_isa_reported():
-    assert _ext.kernel_isa() in ("avx2", "generic")
+def test_kernel_isa_reported(monkeypatch):
+    assert _ext.kernel_isa() in ("avx2", "generic", "scalar")
+    for isa in ("generic", "scalar"):
+        monkeypatch.setenv("ASRFRONT_KERNELS", isa)
+        assert _ext.kernel_isa() == isa
 
 
 def _frontends():
@@ -31,12 +34,13 @@ def _run(fes, audio):
     return out
 
 
+@pytest.mark.parametrize("isa", ["generic", "scalar"])
 @pytest.mark.parametrize("name", SIGNAL_NAMES)
-def test_generic_matches_default(sigs, name, monkeypatch):
-    if _ext.kernel_isa() == "generic":
-        pytest.skip("no SIMD variant on this CPU/build")
+def test_variant_matches_default(sigs, name, isa, monkeypatch):
+    if _ext.kernel_isa() == isa:
+        pytest.skip(f"{isa} is already the default on this CPU/build")
     default = _run(_frontends(), sigs[name])
-    monkeypatch.setenv("ASRFRONT_KERNELS", "generic")
-    generic = _run(_frontends(), sigs[name])
-    for a, b in zip(default, generic):
+    monkeypatch.setenv("ASRFRONT_KERNELS", isa)
+    other = _run(_frontends(), sigs[name])
+    for a, b in zip(default, other):
         np.testing.assert_array_equal(a, b)

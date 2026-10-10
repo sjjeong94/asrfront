@@ -31,8 +31,9 @@ enum {
 const char *af_version(void);
 const char *af_strerror(int err);
 
-/* SIMD kernel variant used by newly created handles: "avx2" or "generic".
- * Set ASRFRONT_KERNELS=generic to force the baseline build (results are identical). */
+/* SIMD kernel variant used by newly created handles: "avx2", "generic" or "scalar".
+ * ASRFRONT_KERNELS=generic|scalar forces the baseline / plain-C build; all variants
+ * produce identical results. */
 const char *af_kernel_isa(void);
 
 /* ------------------------------------------------------------------------ */

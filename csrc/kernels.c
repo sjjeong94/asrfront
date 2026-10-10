@@ -4,6 +4,7 @@
 #include <string.h>
 
 extern const af_kernels af_kernels_generic;
+extern const af_kernels af_kernels_scalar;
 #ifdef AF_HAVE_AVX2
 extern const af_kernels af_kernels_avx2;
 #endif
@@ -36,6 +37,8 @@ const af_kernels *af_kernels_select(void) {
     const char *force = getenv("ASRFRONT_KERNELS");
     if (force && strcmp(force, "generic") == 0)
         return &af_kernels_generic;
+    if (force && strcmp(force, "scalar") == 0)
+        return &af_kernels_scalar;
 #ifdef AF_HAVE_AVX2
     if (cpu_has_avx2())
         return &af_kernels_avx2;

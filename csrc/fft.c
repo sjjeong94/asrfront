@@ -24,7 +24,7 @@ static inline af_cpx cmul(af_cpx a, af_cpx b) {
     return r;
 }
 
-static af_cpx expi(long num, long den) {
+static af_cpx expi(long long num, long long den) {
     /* exp(-2*pi*i * num / den) in double, num reduced to keep the argument small. */
     double a = -TWO_PI * (double)(num % den) / (double)den;
     af_cpx r = {(float)cos(a), (float)sin(a)};
@@ -196,7 +196,7 @@ int af_rfft_create(int n, af_rfft **out) {
         p->stages[s].tw = tw;
         for (int j = 0; j < ns; j++)
             for (int k = 1; k < r; k++)
-                *tw++ = expi((long)j * k, (long)ns * r);
+                *tw++ = expi((long long)j * k, (long long)ns * r);
     }
     p->post_tw = tw;
     for (int k = 0; k <= m; k++)
