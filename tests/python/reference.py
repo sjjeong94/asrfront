@@ -134,6 +134,29 @@ def load_whisper_mel_filters(path: str | Path, n_mels: int) -> np.ndarray:
         return f[f"mel_{n_mels}"]
 
 
+def whisper_log_mel_torch(
+    audio: np.ndarray, n_mels: int, pad_or_trim: bool, mel_npz: str | Path
+) -> np.ndarray:
+    """Verbatim port of openai/whisper ``log_mel_spectrogram`` (MIT), float32 torch.
+
+    Needs the ``ref`` dependency group.
+    """
+    import torch
+
+    if pad_or_trim:
+        audio = whisper_pad_or_trim(audio)
+    x = torch.from_numpy(np.array(audio, dtype=np.float32))  # copy: inputs may be read-only
+    filters = torch.from_numpy(load_whisper_mel_filters(mel_npz, n_mels))
+    window = torch.hann_window(WHISPER_N_FFT)
+    stft = torch.stft(x, WHISPER_N_FFT, WHISPER_HOP, window=window, return_complex=True)
+    magnitudes = stft[..., :-1].abs() ** 2
+    mel_spec = filters @ magnitudes
+    log_spec = torch.clamp(mel_spec, min=1e-10).log10()
+    log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+    log_spec = (log_spec + 4.0) / 4.0
+    return log_spec.numpy()
+
+
 # ---------------------------------------------------------------------------------------------
 # Kaldi fbank (torchaudio.compliance.kaldi.fbank) as configured by FunASR WavFrontend
 # ---------------------------------------------------------------------------------------------

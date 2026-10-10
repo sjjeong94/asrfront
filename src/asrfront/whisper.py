@@ -28,10 +28,21 @@ def log_mel(audio: Any, n_mels: int = 80, pad_or_trim: bool = True) -> np.ndarra
         pad_or_trim: pad/trim the input to 30 s (3000 frames) like ``whisper.pad_or_trim``.
 
     Returns:
-        float32 array of shape ``(n_mels, n_frames)``.
+        float32 array of shape ``(n_mels, n_frames)``; ``n_frames`` is 3000 with
+        ``pad_or_trim``, otherwise ``len(audio) // 160``.
+
+    Raises:
+        ValueError: ``pad_or_trim=False`` and ``audio`` has at most 200 samples (the
+            reflect padding of the centered STFT needs more; whisper/torch fail too).
     """
+    audio = as_audio(audio)
+    if not pad_or_trim and audio.shape[0] <= N_FFT // 2:
+        raise ValueError(
+            f"audio needs more than {N_FFT // 2} samples when pad_or_trim=False, "
+            f"got {audio.shape[0]}"
+        )
     fe = cached_frontend(
         ("whisper", n_mels, bool(pad_or_trim)),
         lambda: _ext.WhisperFrontend(n_mels=n_mels, pad_or_trim=bool(pad_or_trim)),
     )
-    return fe.log_mel(as_audio(audio))
+    return fe.log_mel(audio)

@@ -37,24 +37,6 @@ def test_hann_window_matches_torch():
     assert_close(ref.hann_window_periodic(400), torch.hann_window(400).numpy(), 1e-6, "hann")
 
 
-def _whisper_log_mel_torch(audio: np.ndarray, n_mels: int, pad_or_trim: bool) -> np.ndarray:
-    """Verbatim port of openai/whisper ``log_mel_spectrogram`` (MIT)."""
-    import torch
-
-    if pad_or_trim:
-        audio = ref.whisper_pad_or_trim(audio)
-    x = torch.from_numpy(np.array(audio, dtype=np.float32))  # copy: signals are read-only
-    filters = torch.from_numpy(ref.load_whisper_mel_filters(MEL_NPZ, n_mels))
-    window = torch.hann_window(ref.WHISPER_N_FFT)
-    stft = torch.stft(x, ref.WHISPER_N_FFT, ref.WHISPER_HOP, window=window, return_complex=True)
-    magnitudes = stft[..., :-1].abs() ** 2
-    mel_spec = filters @ magnitudes
-    log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-    log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
-    log_spec = (log_spec + 4.0) / 4.0
-    return log_spec.numpy()
-
-
 @pytest.mark.parametrize("pad_or_trim", [True, False])
 @pytest.mark.parametrize("n_mels", [80, 128])
 @pytest.mark.parametrize("name", SIGNAL_NAMES)
@@ -65,7 +47,7 @@ def test_whisper_reference_matches_torch(sigs, name, n_mels, pad_or_trim):
         with pytest.raises(ValueError):
             ref.whisper_log_mel(audio, n_mels, pad_or_trim)
         return
-    expected = _whisper_log_mel_torch(audio, n_mels, pad_or_trim)
+    expected = ref.whisper_log_mel_torch(audio, n_mels, pad_or_trim, MEL_NPZ)
     actual = ref.whisper_log_mel(audio, n_mels, pad_or_trim)
     assert_close(actual, expected, atol=1e-4, what=name)
 

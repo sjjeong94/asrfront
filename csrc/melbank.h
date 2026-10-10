@@ -1,0 +1,24 @@
+/*
+ * Internal mel filter banks, stored sparsely: each filter keeps only its contiguous
+ * non-zero range of FFT bins.
+ */
+#ifndef ASRFRONT_MELBANK_H
+#define ASRFRONT_MELBANK_H
+
+typedef struct af_melbank af_melbank;
+
+/* librosa.filters.mel(sr, n_fft, n_mels, fmin, fmax) with htk=False, norm='slaney',
+ * reproducing librosa's float32 rounding (as in whisper's mel_filters.npz). */
+int af_melbank_slaney(int sr, int n_fft, int n_mels, double fmin, double fmax, af_melbank **out);
+void af_melbank_destroy(af_melbank *mb);
+
+int af_melbank_n_mels(const af_melbank *mb);
+int af_melbank_n_bins(const af_melbank *mb);
+
+/* mel[m] = sum_k w[m][k] * power[k]. power: n_bins, mel: n_mels. */
+void af_melbank_apply(const af_melbank *mb, const float *power, float *mel);
+
+/* Dense (n_mels, n_bins) copy of the weights, for tests. */
+void af_melbank_to_dense(const af_melbank *mb, float *out);
+
+#endif /* ASRFRONT_MELBANK_H */

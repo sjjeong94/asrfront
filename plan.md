@@ -7,8 +7,8 @@ Implement input feature extraction for ASR models (Whisper, SenseVoiceSmall) in 
 ```python
 import asrfront
 
-mel  = asrfront.whisper.log_mel(audio)    # (80, 3000) float32
-feat = asrfront.sensevoice.fbank(audio)   # (T', 560)  float32
+mel = asrfront.whisper.log_mel(audio)  # (80, 3000) float32
+feat = asrfront.sensevoice.fbank(audio)  # (T', 560)  float32
 ```
 
 **Success criteria**
@@ -215,10 +215,17 @@ void af_sensevoice_destroy(af_sensevoice *h);
 
   Already on par with pocketfft without SIMD; M7 candidates: twiddle-free first stage, radix-8, SIMD across frames, fused power.
 
-### M4. Whisper log_mel (2 days)
-- [ ] Periodic Hann, reflect pad, frame loop, power, slaney mel (80/128) generation + npz comparison
-- [ ] log10 / clamp / global max / normalization
-- [ ] pad_or_trim on/off; accuracy tests pass
+### M4. Whisper log_mel (2 days) — done
+- [x] Periodic Hann, reflect pad, frame loop, power, slaney mel (80/128) generation + npz comparison
+  - `csrc/melbank.{h,c}`: slaney filters generated in double with librosa's float32 rounding order → **bit-identical** to whisper's `mel_filters.npz` (80 and 128); stored sparsely (non-zero range per filter)
+  - reflect padding is done per frame (only edge frames take the slow path); `pad_or_trim` zero-padding/truncation is virtual — no padded copy of the input
+- [x] log10 / clamp / global max / normalization: log10 written transposed into the output while tracking the running max, then one clamp + scale pass
+- [x] pad_or_trim on/off; accuracy tests pass
+  - C vs. float64 reference: worst 4.0e-5 (chirp), speech 1.6e-5 (target 1e-4); also ≤ 1e-4 vs. the torch port of whisper
+  - `pad_or_trim=False` with ≤ 200 samples raises `ValueError` (C: `AF_EINVAL`), matching torch's reflect-pad error; empty input with `pad_or_trim=True` is valid (all-zero 30 s)
+  - also tested: int16/float64/strided/list input, handle reuse, concurrent Python threads
+
+**Speed (30 s, i5-14400F)**: asrfront 5.8 ms vs. torch 5.0 ms (1 thread) / 2.0 ms (16 threads) — currently *slower* than torch. FFT is ~3.4 ms of it; the rest is mostly the 240k `log10f` calls and per-frame overhead. Closing the gap to the 5x target is M7's job (SIMD FFT across frames, fused power+mel, vectorized log).
 
 ### M5. SenseVoice fbank (2 days)
 - [ ] Kaldi framing (snip_edges), DC removal, preemphasis, hamming, 512 FFT, kaldi mel, log

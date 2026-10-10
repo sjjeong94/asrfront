@@ -24,6 +24,7 @@ endif()
 add_library(asrfront_core STATIC
   csrc/common.c
   csrc/fft.c
+  csrc/melbank.c
   csrc/whisper.c
   csrc/sensevoice.c
 )
@@ -48,6 +49,7 @@ if(ASRFRONT_BUILD_PYTHON)
   find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module)
   find_package(nanobind CONFIG REQUIRED)
   nanobind_add_module(_ext NB_STATIC src/asrfront/_ext.cpp)
+  target_include_directories(_ext PRIVATE csrc)  # internal headers (test hooks)
   target_link_libraries(_ext PRIVATE asrfront_core)
   install(TARGETS _ext LIBRARY DESTINATION asrfront)
 endif()

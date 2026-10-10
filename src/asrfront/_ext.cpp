@@ -10,6 +10,9 @@
 #include <stdexcept>
 
 #include "asrfront.h"
+extern "C" {
+#include "melbank.h" // internal; exposed for tests only
+}
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -119,6 +122,21 @@ struct SenseVoice {
 NB_MODULE(_ext, m) {
     m.doc() = "asrfront native extension";
     m.attr("__version__") = af_version();
+
+    m.def(
+        "_whisper_mel_filters",
+        [](int n_mels) {
+            af_melbank *mb = nullptr;
+            check(af_melbank_slaney(AF_SAMPLE_RATE, 400, n_mels, 0.0, AF_SAMPLE_RATE / 2.0, &mb));
+            size_t rows = (size_t)af_melbank_n_mels(mb), cols = (size_t)af_melbank_n_bins(mb);
+            Out2D res = compute_2d(rows, cols, [&](float *out) {
+                af_melbank_to_dense(mb, out);
+                return AF_OK;
+            });
+            af_melbank_destroy(mb);
+            return res;
+        },
+        "n_mels"_a, "Dense (n_mels, 201) slaney filters used by the whisper frontend (testing).");
 
     nb::class_<Whisper>(m, "WhisperFrontend")
         .def(nb::init<int, bool, int>(), "n_mels"_a = 80, "pad_or_trim"_a = true, "n_threads"_a = 1)
