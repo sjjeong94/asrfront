@@ -290,7 +290,7 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 
 **Total estimate: ~12–13 working days** (all milestones implemented; first GitHub CI run pending)
 
-### M9. Audio loading (~6.5 days) — planned
+### M9. Audio loading (~6.5 days) — in progress (M9.1 done)
 - WAV / raw PCM / FLAC / MP3 → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
 
 ---
@@ -356,8 +356,9 @@ librosa. Options can be added later without breaking `load(source)`.
 | Case | Target |
 |---|---|
 | WAV/PCM/FLAC, already 16 kHz mono | **bit-exact** |
-| downmix only (stereo → mono, 16 kHz) | bit-exact; ≤ 1 LSB if ffmpeg's integer rounding can't be reproduced exactly |
-| resample (8k/22.05k/24k/32k/44.1k/48k → 16k) | max abs ≤ **2 LSB** (≈ 6e-5), mean ≤ 0.5 LSB; same length as ffmpeg |
+| downmix only (stereo → mono, 16 kHz) | bit-exact (f64 with ≥ 5 channels: ≤ 1 LSB) |
+| resample, all common rates (exact-ratio mode) | **bit-exact samples** (vs. ffmpeg on AVX2+FMA3; ≤ 1 LSB vs. other CPUs). Length: exact for 8k/11.025k/12k/24k/32k/48k/96k, last sample may differ (±1) for 22.05k/44.1k/88.2k |
+| resample, non-standard rates (> 1024 phases) | ≤ 1 LSB |
 | MP3 | decoder-dependent (different float pipeline from ffmpeg's `mp3float`): max abs ≤ 1e-3 after resample, **same length/alignment** (encoder delay & padding trimmed like ffmpeg) |
 | end-to-end Whisper | `whisper.log_mel(load(f))` vs. `whisper.log_mel_spectrogram(whisper.load_audio(f))` ≤ 1e-3; decoded text identical on jfk |
 | end-to-end SenseVoice | `sensevoice.fbank(load(f))` vs. FunASR `WavFrontend` on FunASR's own loaded audio: identical for 16 kHz WAV; for other rates only the resampler differs (FunASR loads/resamples with torchaudio — **to verify**), so measure the fbank difference and check decoded text is identical |
@@ -422,6 +423,43 @@ the code's expression (function structure, variable layout, table-generation cod
    bundled or linked → no effect on the wheel's license. MP3 patents have expired; FLAC is
    royalty-free. Test fixtures are generated at test time, not vendored.
 6. Not legal advice; revisit if the project is used commercially with stricter requirements.
+
+#### 7.2.2 M9.1 results
+
+Spec: [`docs/load.md`](docs/load.md); reference: `reference.py` "ffmpeg load pipeline"
+(`ffmpeg_load_ref`); checks against the real ffmpeg: `tests/python/test_ffmpeg_ref.py`
+(127 tests, `uv run --group load pytest tests/python/test_ffmpeg_ref.py`; also added to the
+`reference` CI job). Reference: ffmpeg 7.0.2 from `imageio-ffmpeg==0.6.0` (new `load` group).
+
+What the experiments found (several items differ from the "current understanding" above):
+- **Order**: every channel is resampled first, then downmixed.
+- **Three arithmetic paths** chosen by decoder sample format: **int16** (u8 always; s16 when not
+  resampled — Q15 weights/taps, `(acc + 16384) >> 15`), **float32** (s16/s32/f32 when resampled
+  or mixed), **float64** (f64). 16-bit WAV/FLAC at 44.1/48 kHz therefore takes the *float* path,
+  not the integer one assumed earlier.
+- **Filter**: Kaiser-windowed sinc, β = 9, `fc = min(1, 0.97·16000/sr)`, `N = ceil(32/fc)` rounded
+  up to even, all phases normalized by **phase 0's** tap sum; exact rational phases when the
+  reduced denominator ≤ 1024 (every common rate), else 1024 phases + linear interpolation.
+  Edges: reflect at the start, mirror-including-last at the end. Matched to ~1e-16 on ffmpeg's
+  double path for 15 rates.
+- **ffmpeg's float path is CPU-dependent**: on AVX2+FMA3 it is an 8-accumulator FMA dot product with
+  tree reduction (reproduced bit-exactly); plain float32 summation is off by 1 LSB in ~0.03 % of
+  samples. Without FMA (older x86, ARM) ffmpeg itself gives slightly different results.
+- **Quirks reproduced**: int16 downmix wraps instead of saturating (7/8 channels, Q15 weight sum >
+  32768); Q15 tap 1.0 is stored as 32767 (u8 upsampling).
+- **Output length** depends on ffmpeg's internal buffering at end of stream and could not be
+  reduced to a formula; asrfront uses `ceil(n·16000/sr)` (sr ≤ 32 k) / `ceil((n−1)·16000/sr)`
+  (sr > 32 k), exact for most rates, ±1 last sample for 22.05k/44.1k/88.2k in 3–6 % of lengths.
+- **Not reproduced (documented ≤ 1 LSB)**: interpolated mode's exact float order (non-standard
+  rates), f64 downmix with ≥ 5 channels.
+- Source consulted (prose summaries only, §7.2.1) for: end-of-stream padding and the length
+  mechanism (af_aresample / swresample / resample behavior). No code copied.
+
+**Consequence for M9.3**: to be bit-exact with ffmpeg on the common path, the C float resampler
+must use the same 8 accumulators, **fused multiply-add** (`fmaf`) and tree reduction on every ISA.
+This replaces the project's "no FMA" rule *for this kernel*: `fmaf` is correctly rounded by the C
+standard, so hardware FMA (AVX2+FMA3 variant) and the libm fallback (generic/scalar variants)
+still give bit-identical results; the scalar fallback is slower on CPUs without FMA.
 
 ### 7.3 C design
 
@@ -492,8 +530,9 @@ void af_audio_free(float *p);
   public API; tests reach them through the `_ext` test hooks like the existing internal kernels.
   One-shot only (whole file in memory); a streaming resampler can be exposed later if needed.
 - Resampler hot loop: polyphase FIR, taps contiguous per phase; reuse the `kernels_impl.c`
-  multi-ISA scheme (dot products of 32 taps vectorize well). **Integer s16 path must stay
-  bit-identical across ISAs**; float path follows the existing no-FMA/no-reassociation rule.
+  multi-ISA scheme. Three paths per §7.2.2 (int16 / float32 / float64). The float32 path uses
+  8 accumulators + `fmaf` + tree reduction (ffmpeg's AVX2/FMA3 kernel) on **every** ISA, so all
+  variants stay bit-identical (AVX2 build adds `-mfma`; FMA3 must then be checked at dispatch).
 
 ### 7.4 Python API
 
@@ -551,7 +590,7 @@ def load(source: str | os.PathLike[str] | bytes | bytearray | memoryview) -> np.
 
 | Step | Contents | Est. |
 |---|---|---|
-| M9.1 | Pin ffmpeg behavior per §7.2.1: probe-signal experiments first, swr source only for unexplained gaps (behavior notes only); write the `docs/load.md` spec; then write `ffmpeg_resample_ref` (Python) **from the spec** and confirm downmix/resample/rounding/length rules bit-exact vs. ffmpeg | 1.5 d |
+| M9.1 ✅ | Pin ffmpeg behavior per §7.2.1: probe-signal experiments first, swr source only for unexplained gaps (behavior notes only); write the `docs/load.md` spec; then write `ffmpeg_resample_ref` (Python) **from the spec** and confirm downmix/resample/rounding/length rules bit-exact vs. ffmpeg | 1.5 d |
 | M9.2 | WAV + raw PCM parser, downmix, s16 rounding, `af_load_memory/file` + format detection rules, Python `load(path | bytes)` (no resampling yet: non-16 kHz → `AF_EUNSUPPORTED` temporarily) | 1 d |
 | M9.3 | Resampler **from `docs/load.md` + DSP literature only, swr source not consulted** (§7.2.1): s16 integer path + float path, exact length/delay handling; internal only (one-shot) | 1.5 d |
 | M9.4 | FLAC (dr_flac) + MP3 (dr_mp3, gapless trim) integration, strict MP3 sniffing | 1 d |

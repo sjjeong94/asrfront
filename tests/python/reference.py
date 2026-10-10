@@ -4,6 +4,8 @@
   ``librosa.filters.mel`` (ISC).
 - SenseVoice: port of ``torchaudio.compliance.kaldi.fbank`` (BSD-2-Clause) plus
   ``apply_lfr`` / ``apply_cmvn`` / ``load_cmvn`` from FunASR's ``WavFrontend`` (MIT).
+- Audio loading: ffmpeg's decode -> resample -> downmix -> s16 pipeline as used by whisper's
+  ``load_audio``, written from the behavior spec in ``docs/load.md`` (not from ffmpeg's code).
 
 Every stage is exposed separately so intermediate values (window, filters, power spectrum,
 ...) can be compared when debugging the C implementation. Everything is computed in float64;
@@ -312,3 +314,264 @@ def sensevoice_fbank(
     if cmvn is not None:
         feats = apply_cmvn(feats, np.asarray(cmvn[0], np.float64), np.asarray(cmvn[1], np.float64))
     return feats
+
+
+# ---------------------------------------------------------------------------------------------
+# ffmpeg load pipeline (docs/load.md)
+# ---------------------------------------------------------------------------------------------
+
+FFMPEG_MAX_EXACT_PHASES = 1024
+FFMPEG_FILTER_SIZE = 32
+FFMPEG_CUTOFF = 0.97
+FFMPEG_KAISER_BETA = 9.0
+
+_SQRT_HALF = float(np.sqrt(0.5))
+FFMPEG_DOWNMIX_WEIGHT = {
+    "FC": 1.0,
+    **dict.fromkeys(["FL", "FR", "FLC", "FRC", "TFL", "TFR"], _SQRT_HALF),
+    **dict.fromkeys(["BL", "BR", "SL", "SR", "BC"], 0.5),
+}  # anything else (LFE, top, wide, ...) -> 0
+
+FFMPEG_DEFAULT_LAYOUTS = {
+    1: ["FC"],
+    2: ["FL", "FR"],
+    3: ["FL", "FR", "LFE"],
+    4: ["FL", "FR", "FC", "BC"],
+    5: ["FL", "FR", "FC", "BL", "BR"],
+    6: ["FL", "FR", "FC", "LFE", "BL", "BR"],
+    7: ["FL", "FR", "FC", "LFE", "BC", "SL", "SR"],
+    8: ["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"],
+}
+
+
+def ffmpeg_downmix_weights(layout: list[str]) -> np.ndarray:
+    """Normalized mono downmix weights for a channel layout (list of position names)."""
+    if len(layout) == 1:
+        return np.ones(1)
+    w = np.array([FFMPEG_DOWNMIX_WEIGHT.get(c, 0.0) for c in layout])
+    total = np.abs(w).sum()
+    return w / total if total > 1 else w
+
+
+def ffmpeg_resample_params(sr_in: int, sr_out: int = SAMPLE_RATE) -> dict:
+    """Filter parameters: taps N, cutoff fc, phase count, exact mode, ratio p/q."""
+    from fractions import Fraction
+    from math import ceil
+
+    fc = min(1.0, FFMPEG_CUTOFF * sr_out / sr_in)
+    n_taps = ceil(FFMPEG_FILTER_SIZE / fc)
+    n_taps += n_taps % 2
+    ratio = Fraction(sr_in, sr_out)
+    exact = ratio.denominator <= FFMPEG_MAX_EXACT_PHASES
+    phases = ratio.denominator if exact else FFMPEG_MAX_EXACT_PHASES
+    return {
+        "n_taps": n_taps,
+        "fc": fc,
+        "phases": phases,
+        "exact": exact,
+        "p": ratio.numerator,
+        "q": ratio.denominator,
+    }
+
+
+def _ffmpeg_taps(frac: float, n_taps: int, fc: float) -> np.ndarray:
+    """Unnormalized taps for x[b + r], r = -N/2+1 .. N/2, output at b + frac."""
+    r = np.arange(-(n_taps // 2) + 1, n_taps // 2 + 1)
+    d = frac - r
+    sinc = np.sinc(fc * d)  # np.sinc(x) = sin(pi x) / (pi x)
+    w = d / (n_taps / 2)
+    win = np.i0(FFMPEG_KAISER_BETA * np.sqrt(np.clip(1.0 - w * w, 0.0, None)))
+    return sinc * np.where(np.abs(w) <= 1, win, 0.0)
+
+
+def ffmpeg_filter_bank(sr_in: int, sr_out: int = SAMPLE_RATE) -> np.ndarray:
+    """(phases + 1, N) float64 filter bank; row m is the filter for frac = m / phases.
+
+    Every row is divided by the tap sum of phase 0. The extra last row is phase 0 shifted by one
+    input sample (used by interpolated mode; in exact mode it equals the frac = 1 position).
+    """
+    prm = ffmpeg_resample_params(sr_in, sr_out)
+    n_taps, fc, phases = prm["n_taps"], prm["fc"], prm["phases"]
+    bank = np.stack([_ffmpeg_taps(m / phases, n_taps, fc) for m in range(phases)])
+    bank /= bank[0].sum()
+    shifted = np.concatenate([[0.0], bank[0, :-1]])
+    return np.vstack([bank, shifted])
+
+
+def ffmpeg_out_len(n: int, sr_in: int, sr_out: int = SAMPLE_RATE) -> int:
+    """Output length used by asrfront (ffmpeg's own rule is not reproducible exactly)."""
+    if sr_in == sr_out:
+        return n
+    if n == 0:
+        return 0
+    m = n - 1 if sr_in > 2 * sr_out else n
+    return -(-m * sr_out // sr_in)
+
+
+def _fma32(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Correctly rounded float32 fused multiply-add (vectorized).
+
+    a*b is exact in float64; the float64 sum can only mis-round when it lands exactly on a
+    float32 midpoint, which is fixed using the exact sum error (TwoSum).
+    """
+    p = a.astype(np.float64) * b.astype(np.float64)
+    c64 = c.astype(np.float64)
+    s = p + c64
+    bb = s - p
+    err = (p - (s - bb)) + (c64 - bb)
+    r = s.astype(np.float32)
+    d = s - r.astype(np.float64)
+    toward = np.where(d > 0, np.float32(np.inf), np.float32(-np.inf))
+    nb = np.nextafter(r, toward)
+    tie = (d != 0) & (s == (r.astype(np.float64) + nb.astype(np.float64)) / 2) & (err != 0)
+    fix = tie & (np.sign(err) == np.sign(d))
+    return np.where(fix, nb, r)
+
+
+def _dot8_fma(h: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Row-wise float32 dot product: 8 FMA accumulators + tree reduction (docs/load.md)."""
+    n, taps = h.shape
+    width = -(-taps // 8) * 8
+    hp = np.zeros((n, width), np.float32)
+    xp = np.zeros((n, width), np.float32)
+    hp[:, :taps] = h
+    xp[:, :taps] = x
+    acc = np.zeros((n, 8), np.float32)
+    for i in range(0, width, 8):
+        acc = _fma32(hp[:, i : i + 8], xp[:, i : i + 8], acc)
+    s = acc[:, :4] + acc[:, 4:]
+    s = s[:, :2] + s[:, 2:]
+    return s[:, 0] + s[:, 1]
+
+
+def _mirror_index(idx: np.ndarray, n: int) -> np.ndarray:
+    """Start: x[-j] = x[j]; end: x[n-1+j] = x[n-j]."""
+    for _ in range(4):  # repeated for inputs shorter than the filter
+        idx = np.where(idx < 0, -idx, idx)
+        idx = np.where(idx > n - 1, 2 * n - 1 - idx, idx)
+    return np.clip(idx, 0, n - 1)
+
+
+def ffmpeg_resample(
+    x: np.ndarray, sr_in: int, path: str, sr_out: int = SAMPLE_RATE, block: int = 32768
+) -> np.ndarray:
+    """Resample one channel like ffmpeg.
+
+    path="float": x float32 in [-1, 1] -> float32;  "double": float64 -> float64;
+    "int16": integer s16 values -> int64 s16 values (Q15 taps, saturated).
+    """
+    prm = ffmpeg_resample_params(sr_in, sr_out)
+    bank = ffmpeg_filter_bank(sr_in, sr_out)
+    n = len(x)
+    n_out = ffmpeg_out_len(n, sr_in, sr_out)
+    p, q, phases, exact = prm["p"], prm["q"], prm["phases"], prm["exact"]
+    r = np.arange(-(prm["n_taps"] // 2) + 1, prm["n_taps"] // 2 + 1)
+    if path == "float":
+        bank_c = bank.astype(np.float32)
+        out = np.empty(n_out, np.float32)
+    elif path == "double":
+        bank_c = bank
+        out = np.empty(n_out, np.float64)
+    elif path == "int16":
+        # Q15 taps are stored as int16: a tap of exactly 1.0 (upsampling phase 0) becomes 32767.
+        bank_c = np.clip(np.rint(bank * 32768.0), -32768, 32767).astype(np.int64)
+        out = np.empty(n_out, np.int64)
+    else:
+        raise ValueError(path)
+    x = np.asarray(x)
+    for k0 in range(0, n_out, block):
+        k = np.arange(k0, min(n_out, k0 + block), dtype=np.int64)
+        num = k * p
+        b, rem = num // q, num % q
+        xs = x[_mirror_index(b[:, None] + r[None, :], n)]
+        if exact:
+            rows = (rem * phases) // q
+            h = bank_c[rows]
+            if path == "float":
+                out[k] = _dot8_fma(h, xs.astype(np.float32))
+            elif path == "double":
+                out[k] = np.einsum("ij,ij->i", h, xs)
+            else:
+                acc = (h * xs.astype(np.int64)).sum(axis=1)
+                out[k] = np.clip((acc + 16384) >> 15, -32768, 32767)
+        else:
+            fp = rem * phases
+            m = fp // q
+            a = (fp - m * q) / q
+            if path == "float":
+                xs32 = xs.astype(np.float32)
+                v1 = _dot8_fma(bank_c[m], xs32)
+                v2 = _dot8_fma(bank_c[m + 1], xs32)
+                out[k] = v1 + (v2 - v1) * a.astype(np.float32)
+            elif path == "double":
+                h = bank_c[m] + (bank_c[m + 1] - bank_c[m]) * a[:, None]
+                out[k] = np.einsum("ij,ij->i", h, xs)
+            else:
+                raise NotImplementedError("int16 path in interpolated mode")
+    return out
+
+
+FFMPEG_SAMPLE_FORMATS = ("u8", "s16", "s32", "f32", "f64")
+
+
+def ffmpeg_load_ref(
+    samples: np.ndarray,
+    sample_fmt: str,
+    sr: int,
+    layout: list[str] | None = None,
+) -> np.ndarray:
+    """whisper ``load_audio`` result as int16, from decoded ``(n, channels)`` samples.
+
+    samples dtype: u8 -> uint8, s16 -> int16, s32 -> int32 (24-bit audio in the top bits),
+    f32 -> float32, f64 -> float64. ``layout`` defaults to ffmpeg's layout for the channel count.
+    """
+    x = np.asarray(samples)
+    if x.ndim == 1:
+        x = x[:, None]
+    ch = x.shape[1]
+    weights = ffmpeg_downmix_weights(layout or FFMPEG_DEFAULT_LAYOUTS[ch])
+    resample = sr != SAMPLE_RATE
+
+    def sat(v: np.ndarray) -> np.ndarray:
+        return np.clip(v, -32768, 32767).astype(np.int16)
+
+    def to_s16(v: np.ndarray) -> np.ndarray:  # float/double -> s16, round half to even
+        return sat(np.rint(v.astype(np.float64) * 32768.0))
+
+    int_path = sample_fmt == "u8" or (sample_fmt == "s16" and not resample)
+    if int_path:
+        xi = (x.astype(np.int64) - 128) << 8 if sample_fmt == "u8" else x.astype(np.int64)
+        if resample:
+            xi = np.stack([ffmpeg_resample(xi[:, c], sr, "int16") for c in range(ch)], axis=1)
+        if ch == 1:
+            return sat(xi[:, 0])
+        qw = np.rint(weights * 32768.0).astype(np.int64)
+        # Not saturated: wraps to int16 when the Q15 weights sum above 32768 (7/8 channels).
+        return ((xi @ qw + 16384) >> 15).astype(np.int16)
+
+    if sample_fmt == "s32" and ch == 1 and not resample:
+        return (x[:, 0].astype(np.int64) >> 16).astype(np.int16)
+
+    if sample_fmt == "f64":
+        xf, dt, path = x.astype(np.float64), np.float64, "double"
+    elif sample_fmt == "s32":
+        xf, dt, path = x.astype(np.float32) * np.float32(2.0**-31), np.float32, "float"
+    elif sample_fmt == "s16":
+        xf, dt, path = x.astype(np.float32) / np.float32(32768.0), np.float32, "float"
+    elif sample_fmt == "f32":
+        xf, dt, path = x.astype(np.float32), np.float32, "float"
+    else:
+        raise ValueError(f"unknown sample_fmt {sample_fmt!r}")
+    if resample:
+        xf = np.stack([ffmpeg_resample(xf[:, c], sr, path) for c in range(ch)], axis=1)
+    if ch == 1:
+        return to_s16(xf[:, 0])
+    acc = np.zeros(xf.shape[0], dt)
+    for c in range(ch):
+        acc = (acc + xf[:, c] * dt(weights[c])).astype(dt)
+    return to_s16(acc)
+
+
+def ffmpeg_load_float(samples: np.ndarray, sample_fmt: str, sr: int, layout=None) -> np.ndarray:
+    """``ffmpeg_load_ref(...) / 32768`` as float32, i.e. whisper's ``load_audio`` output."""
+    return ffmpeg_load_ref(samples, sample_fmt, sr, layout).astype(np.float32) / np.float32(32768)

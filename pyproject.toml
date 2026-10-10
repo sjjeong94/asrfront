@@ -43,6 +43,9 @@ dev = [
     "pytest>=7",
     "ruff>=0.6",
 ]
+load = [
+    "imageio-ffmpeg==0.6.0",  # bundles ffmpeg 7.0.2 (reference for asrfront.load)
+]
 ref = [
     "soundfile>=0.13.1",
     "torch>=2.8.0",
