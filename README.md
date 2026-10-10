@@ -76,7 +76,7 @@ All native calls release the GIL. The `*_batch` functions spread items over a th
 | kaldi fbank only | 1.3 ms | `torchaudio.compliance.kaldi.fbank` 11–12 ms | ~9x |
 
 Full results (thread scaling, input lengths, kernel variants, methodology):
-[`docs/benchmark.md`](docs/benchmark.md).
+[`docs/benchmark.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/benchmark.md).
 
 Kernels process 8 frames at a time in SIMD lanes. On x86-64 an AVX2 build is selected at
 runtime when available (`asrfront._ext.kernel_isa()`); `ASRFRONT_KERNELS=generic` forces the
@@ -86,7 +86,7 @@ baseline build. All variants give bit-identical results. Batch of 32 × 30 s: ~7
 ## Accuracy
 
 Maximum absolute error against float64 reference implementations
-([`tests/python/reference.py`](tests/python/reference.py)) over 16 test signals (silence,
+([`tests/python/reference.py`](https://github.com/sjjeong94/asrfront/blob/main/tests/python/reference.py)) over 16 test signals (silence,
 tones, chirp, noise, clipping, DC offset, real speech, short and > 30 s inputs):
 
 | | worst case | speech | target |
@@ -109,12 +109,12 @@ uv run cmake -S . -B build/ctest -G Ninja -DASRFRONT_BUILD_TESTS=ON -DASRFRONT_B
 uv run cmake --build build/ctest && uv run ctest --test-dir build/ctest
 ```
 
-The C API is in [`csrc/include/asrfront.h`](csrc/include/asrfront.h). The preprocessing of each
-model is documented step by step in [`docs/whisper.md`](docs/whisper.md) and
-[`docs/sensevoice.md`](docs/sensevoice.md); see [`plan.md`](plan.md) for design and
+The C API is in [`csrc/include/asrfront.h`](https://github.com/sjjeong94/asrfront/blob/main/csrc/include/asrfront.h). The preprocessing of each
+model is documented step by step in [`docs/whisper.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/whisper.md) and
+[`docs/sensevoice.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/sensevoice.md); see [`plan.md`](https://github.com/sjjeong94/asrfront/blob/main/plan.md) for design and
 implementation notes.
 
 ## License
 
 MIT. Test data in `tests/data` comes from [openai/whisper](https://github.com/openai/whisper)
-(MIT); see [`tests/data/README.md`](tests/data/README.md).
+(MIT); see [`tests/data/README.md`](https://github.com/sjjeong94/asrfront/blob/main/tests/data/README.md).

@@ -2,6 +2,11 @@ name: Wheels
 
 on:
   workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Upload the built wheels and sdist to TestPyPI"
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
   release:
@@ -36,8 +41,29 @@ jobs:
           name: wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
 
+  publish-testpypi:
+    # Rehearsal: Actions -> Wheels -> Run workflow with "testpypi" checked.
+    # Trusted publishing: register this repository / wheels.yml / environment "testpypi"
+    # as a (pending) publisher on test.pypi.org first.
+    if: github.event_name == 'workflow_dispatch' && inputs.testpypi
+    needs: [sdist, wheels]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true  # re-running for the same version is not an error
+
   publish:
-    # PyPI trusted publishing: register this repository/workflow/environment on PyPI first.
+    # Publishing a GitHub release uploads to PyPI. Trusted publishing: register this
+    # repository / wheels.yml / environment "pypi" as a (pending) publisher on pypi.org first.
     if: github.event_name == 'release'
     needs: [sdist, wheels]
     runs-on: ubuntu-latest
