@@ -295,11 +295,13 @@ So on ARM (including Apple silicon), asrfront matches whisper's ffmpeg-based loa
 
 The tests pick the tolerance with `helpers.ffmpeg_is_reference_build()` (x86-64 with AVX2 and
 FMA3 → exact; anything else → 1 LSB on the float path); `ASRFRONT_FFMPEG_EXACT=0/1` overrides
-it. On macOS, imageio-ffmpeg 0.6.0 ships ffmpeg **7.1** instead of 7.0.2 (not checked).
+it. On macOS, imageio-ffmpeg 0.6.0 ships ffmpeg **7.1** instead of 7.0.2; the CI job
+`ffmpeg-macos` runs the comparison suite against it on Apple silicon.
 
 On aarch64 `fmaf()` compiles to NEON `fmla` (no libm call). Not measured: speed on real ARM
-hardware (qemu only). The Linux aarch64 wheels are built with GCC in CI, where the aarch64 test
-job runs the bit-exact C-vs-reference tests natively; macOS is not built or tested in CI.
+hardware (qemu only). The Linux aarch64 wheels are built with GCC and the macOS wheels with
+Apple clang in CI, where the aarch64 / Apple silicon test jobs run the bit-exact
+C-vs-reference tests natively.
 
 ## Summary of accuracy targets (M9)
 

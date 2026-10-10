@@ -16,6 +16,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: C",
@@ -68,6 +69,10 @@ skip = ["*-win32", "*_i686", "*-musllinux_*"]
 build-frontend = "build[uv]"
 test-requires = ["pytest"]
 test-command = "pytest {project}/tests/python -q"
+
+[tool.cibuildwheel.macos]
+# x86_64 wheels; arm64 wheels always target macOS 11.0+
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.15" }
 
 [tool.uv]
 # `ref` holds the heavyweight reference implementations (torch, torchaudio) used only to

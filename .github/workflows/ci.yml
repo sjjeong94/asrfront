@@ -32,7 +32,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest]
+        # macos-latest: Apple silicon (arm64); macos-15-intel: x86_64
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest]
         python: ["3.9", "3.13"]
     env:
       UV_PYTHON: ${{ matrix.python }}
@@ -63,6 +64,17 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --group ref --group load
       - run: uv run --no-sync pytest -q
+
+  ffmpeg-macos:
+    # asrfront.load against ffmpeg on Apple silicon (imageio-ffmpeg ships ffmpeg 7.1 for macOS).
+    # Off the x86 AVX2+FMA3 reference build the float path is compared to 1 LSB
+    # (tests/python/helpers.py: ffmpeg_is_reference_build, docs/load.md "Other platforms").
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --group load
+      - run: uv run --no-sync pytest -q tests/python/test_ffmpeg_ref.py tests/python/test_load.py
 
   sanitizers:
     runs-on: ubuntu-latest
