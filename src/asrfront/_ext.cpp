@@ -8,6 +8,7 @@
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 #include "asrfront.h"
 extern "C" {
@@ -20,6 +21,7 @@ using namespace nb::literals;
 using Audio = nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Vec = nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Out2D = nb::ndarray<nb::numpy, float, nb::ndim<2>, nb::c_contig>;
+using OutArg = std::optional<nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu>>;
 
 static void check(int rc) {
     switch (rc) {
@@ -51,6 +53,26 @@ template <typename F> static Out2D compute_2d(size_t rows, size_t cols, F &&fn) 
     return Out2D(buf, {rows, cols}, owner);
 }
 
+// Either fill a new array (out is None) or write into the caller's C-contiguous,
+// writable float32 buffer of exactly (rows, cols) and return None.
+template <typename F>
+static nb::object compute_into(size_t rows, size_t cols, OutArg &out, F &&fn) {
+    if (!out)
+        return nb::cast(compute_2d(rows, cols, fn));
+    if (out->shape(0) != rows || out->shape(1) != cols)
+        throw nb::value_error(("out has shape (" + std::to_string(out->shape(0)) + ", " +
+                               std::to_string(out->shape(1)) + "), expected (" +
+                               std::to_string(rows) + ", " + std::to_string(cols) + ")")
+                                  .c_str());
+    int rc;
+    {
+        nb::gil_scoped_release release;
+        rc = fn(out->data());
+    }
+    check(rc);
+    return nb::none();
+}
+
 struct Whisper {
     af_whisper *h = nullptr;
     int n_mels;
@@ -67,11 +89,11 @@ struct Whisper {
     Whisper(const Whisper &) = delete;
     Whisper &operator=(const Whisper &) = delete;
 
-    Out2D log_mel(Audio audio) {
+    nb::object log_mel(Audio audio, OutArg out) {
         size_t n = audio.shape(0);
         size_t frames = af_whisper_out_frames(h, n);
-        return compute_2d((size_t)n_mels, frames,
-                          [&](float *out) { return af_whisper_log_mel(h, audio.data(), n, out); });
+        return compute_into((size_t)n_mels, frames, out,
+                            [&](float *o) { return af_whisper_log_mel(h, audio.data(), n, o); });
     }
 };
 
@@ -105,16 +127,16 @@ struct SenseVoice {
     SenseVoice(const SenseVoice &) = delete;
     SenseVoice &operator=(const SenseVoice &) = delete;
 
-    Out2D fbank(Audio audio) {
+    nb::object fbank(Audio audio, OutArg out) {
         size_t n = audio.shape(0);
-        return compute_2d(af_sensevoice_out_frames(h, n), af_sensevoice_feat_dim(h),
-                          [&](float *out) { return af_sensevoice_fbank(h, audio.data(), n, out); });
+        return compute_into(af_sensevoice_out_frames(h, n), af_sensevoice_feat_dim(h), out,
+                            [&](float *o) { return af_sensevoice_fbank(h, audio.data(), n, o); });
     }
 
-    Out2D fbank_raw(Audio audio) {
+    nb::object fbank_raw(Audio audio, OutArg out) {
         size_t n = audio.shape(0);
-        return compute_2d(af_sensevoice_raw_frames(h, n), (size_t)n_mels, [&](float *out) {
-            return af_sensevoice_fbank_raw(h, audio.data(), n, out);
+        return compute_into(af_sensevoice_raw_frames(h, n), (size_t)n_mels, out, [&](float *o) {
+            return af_sensevoice_fbank_raw(h, audio.data(), n, o);
         });
     }
 };
@@ -159,7 +181,10 @@ NB_MODULE(_ext, m) {
         .def(
             "out_frames", [](const Whisper &w, size_t n) { return af_whisper_out_frames(w.h, n); },
             "n_samples"_a)
-        .def("log_mel", &Whisper::log_mel, "audio"_a);
+        .def("log_mel", &Whisper::log_mel, "audio"_a,
+             nb::arg("out").none().noconvert() = nb::none(),
+             "Log-mel spectrogram (n_mels, out_frames). With `out`, writes into it and returns "
+             "None.");
 
     nb::class_<SenseVoice>(m, "SenseVoiceFrontend")
         .def(nb::init<int, int, int, float, unsigned long long, std::optional<Vec>,
@@ -175,7 +200,11 @@ NB_MODULE(_ext, m) {
             "out_frames",
             [](const SenseVoice &s, size_t n) { return af_sensevoice_out_frames(s.h, n); },
             "n_samples"_a)
-        .def("fbank", &SenseVoice::fbank, "audio"_a)
         .def_ro("n_mels", &SenseVoice::n_mels)
-        .def("fbank_raw", &SenseVoice::fbank_raw, "audio"_a);
+        .def("fbank", &SenseVoice::fbank, "audio"_a, nb::arg("out").none().noconvert() = nb::none(),
+             "LFR (+CMVN) features (out_frames, feat_dim). With `out`, writes into it and returns "
+             "None.")
+        .def("fbank_raw", &SenseVoice::fbank_raw, "audio"_a,
+             nb::arg("out").none().noconvert() = nb::none(),
+             "Raw kaldi fbank (raw_frames, n_mels). With `out`, writes into it and returns None.");
 }

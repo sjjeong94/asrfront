@@ -236,10 +236,19 @@ void af_sensevoice_destroy(af_sensevoice *h);
 
 **Speed (30 s, i5-14400F, with CMVN)**: asrfront 5.2 ms vs. FunASR-style torch 9.2 ms (1 thread, 1.8x) / 4.8 ms (16 threads); torchaudio `kaldi.fbank` alone 7.8 ms. Target 5x → M7.
 
-### M6. Polish Python API (1 day)
-- [ ] dtype/shape validation with helpful error messages; int16/float64 input handling
-- [ ] GIL release, zero-copy output, `.pyi` type stubs, docstrings
-- [ ] Batch API
+### M6. Polish Python API (1 day) — done
+- [x] dtype/shape validation with helpful error messages; int16/float64 input handling
+  - accepted: float16/32/64 (cast to float32), int16 PCM (÷32768), lists, CPU torch tensors (via `np.asarray`)
+  - `TypeError` for other integer dtypes (ambiguous scale; message suggests the divisor), bool/complex/object
+  - `ValueError` for non-1-D input (2-D hint: mix down channels or use `*_batch`), unsupported `n_mels`, bad `lfr_m`/`lfr_n`/`dither`/`seed`, short whisper input, cmvn length; batch errors name the offending item (`audios[3]`)
+- [x] GIL release, zero-copy output, `.pyi` type stubs (overloads for `out=`), docstrings; `mypy --strict src/asrfront` clean (mypy in dev group)
+- [x] Batch API (Python thread pool over GIL-releasing native calls, per-thread handles):
+  - `whisper.log_mel_batch(audios, n_mels, pad_or_trim, n_threads)` → `(B, n_mels, 3000)` (list of arrays when `pad_or_trim=False`)
+  - `sensevoice.fbank_batch(audios, cmvn, ..., n_threads)` → `(feats (B, max_len, 560) zero-padded, lengths int32)` like FunASR `WavFrontend`
+  - low-level `out=` argument on `WhisperFrontend.log_mel` / `SenseVoiceFrontend.fbank` / `fbank_raw` writes straight into a caller buffer (exact shape, writable, C-contiguous float32; never converted), so batch results are not copied
+  - scaling, 32 × 30 s on i5-14400F (6P+4E cores): whisper 178.8 ms (1 thread) → 31.6 ms (8) → 25.8 ms (16), **6.9x / 0.81 ms per item**; sensevoice 6.1x with 16 threads
+  - Python wrapper overhead ~2.6 µs per call
+- Since batch parallelism is already handled from Python, M7 threading inside the C core is only needed for single long inputs.
 
 ### M7. Optimization (3 days)
 - [ ] Benchmark scripts (`bench/`): asrfront vs. whisper (torch CPU), librosa, torchaudio kaldi, kaldi-native-fbank, FunASR

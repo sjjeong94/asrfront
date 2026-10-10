@@ -1,17 +1,33 @@
+"""asrfront native extension (low-level; prefer asrfront.whisper / asrfront.sensevoice).
+
+Frontend objects are not thread-safe: use one per thread. Compute methods release the GIL.
+Inputs must be C-contiguous float32 1-D arrays; ``out`` must be a writable C-contiguous
+float32 array of the exact output shape (it is never converted or copied).
+"""
+
+from typing import overload
+
 import numpy as np
 import numpy.typing as npt
 
 __version__: str
 
+_F32 = npt.NDArray[np.float32]
+
+def _whisper_mel_filters(n_mels: int) -> _F32: ...
+def _kaldi_mel_banks(n_mels: int) -> _F32: ...
+
 class WhisperFrontend:
-    n_mels: int
     def __init__(self, n_mels: int = 80, pad_or_trim: bool = True, n_threads: int = 1) -> None: ...
+    @property
+    def n_mels(self) -> int: ...
     def out_frames(self, n_samples: int) -> int: ...
-    def log_mel(self, audio: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]: ...
+    @overload
+    def log_mel(self, audio: _F32, out: None = None) -> _F32: ...
+    @overload
+    def log_mel(self, audio: _F32, out: _F32) -> None: ...
 
 class SenseVoiceFrontend:
-    n_mels: int
-    feat_dim: int
     def __init__(
         self,
         n_mels: int = 80,
@@ -19,11 +35,21 @@ class SenseVoiceFrontend:
         lfr_n: int = 6,
         dither: float = 0.0,
         seed: int = 0,
-        cmvn_shift: npt.NDArray[np.float32] | None = None,
-        cmvn_scale: npt.NDArray[np.float32] | None = None,
+        cmvn_shift: _F32 | None = None,
+        cmvn_scale: _F32 | None = None,
         n_threads: int = 1,
     ) -> None: ...
+    @property
+    def n_mels(self) -> int: ...
+    @property
+    def feat_dim(self) -> int: ...
     def raw_frames(self, n_samples: int) -> int: ...
     def out_frames(self, n_samples: int) -> int: ...
-    def fbank(self, audio: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]: ...
-    def fbank_raw(self, audio: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]: ...
+    @overload
+    def fbank(self, audio: _F32, out: None = None) -> _F32: ...
+    @overload
+    def fbank(self, audio: _F32, out: _F32) -> None: ...
+    @overload
+    def fbank_raw(self, audio: _F32, out: None = None) -> _F32: ...
+    @overload
+    def fbank_raw(self, audio: _F32, out: _F32) -> None: ...
