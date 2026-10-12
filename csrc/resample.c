@@ -26,10 +26,10 @@ struct af_resampler {
     int width;     /* N rounded up to a multiple of LANES (float bank row stride) */
     int phases;
     int exact;
-    double *bank;                                            /* (phases + 1) x n_taps */
-    float *bankf;                                            /* (phases + 1) x width, zero padded */
-    int32_t *bankq;                                          /* (phases + 1) x n_taps, Q15 */
-    float (*dot)(const float *h, const float *x, int width); /* float path kernel */
+    double *bank;           /* (phases + 1) x n_taps */
+    float *bankf;           /* (phases + 1) x width, zero padded */
+    int32_t *bankq;         /* (phases + 1) x n_taps, Q15 */
+    const af_kernels *kern; /* float path kernels */
 };
 
 static uint64_t gcd_u64(uint64_t a, uint64_t b) {
@@ -132,7 +132,7 @@ int af_resampler_create(int sr_in, int sr_out, af_resampler **out) {
                                                                 : v);
         }
     }
-    r->dot = af_kernels_select()->resample_dot;
+    r->kern = af_kernels_select(); /* once: the selection runs cpuid (slow in VMs) */
     *out = r;
     return AF_OK;
 }
@@ -229,29 +229,59 @@ static size_t mirror(ptrdiff_t i, size_t n) {
         }                                                                                          \
     } while (0)
 
-void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) {
-    size_t n_out = af_resampler_out_len(r, n);
+/* First input sample read by output k (before mirroring): b_k - N/2 + 1. */
+static ptrdiff_t first_read(const af_resampler *r, size_t k) {
+    return (ptrdiff_t)((uint64_t)k * r->p / r->q) - r->n_taps / 2 + 1;
+}
+
+void af_resampler_span(const af_resampler *r, size_t n, size_t k0, size_t k1, size_t *lo,
+                       size_t *hi) {
+    const ptrdiff_t nn = (ptrdiff_t)n, wd = r->width;
+    if (k1 <= k0 || nn < 2 * wd + 2) { /* nothing, or short input: mirrors may bounce */
+        *lo = 0;
+        *hi = n;
+        return;
+    }
+    ptrdiff_t a = first_read(r, k0), b = first_read(r, k1 - 1) + wd;
+    if (a < 0) { /* x[-j] = x[j], j <= N/2 - 1 */
+        a = 0;
+        b = b > wd ? b : wd;
+    }
+    if (b > nn) { /* x[n-1+j] = x[n-1-j], j <= width */
+        b = nn;
+        a = a < nn - 1 - wd ? a : nn - 1 - wd;
+    }
+    *lo = (size_t)a;
+    *hi = (size_t)(b > a ? b : a);
+}
+
+void af_resample_f32_range(const af_resampler *r, const float *x, size_t x0, size_t n, size_t k0,
+                           size_t k1, float *y) {
     const int nt = r->n_taps, wd = r->width;
-    const af_kernels *kern = af_kernels_select();
+    const af_kernels *kern = r->kern;
     /* N <= ceil(32 * sr / (0.97 * 16000)), rounded up to a multiple of 8 */
     float edge_[AF_RESAMPLE_MAX_RATE / 485 + 16] = {0};
     /* The kernel reads `width` samples from first = b - N/2 + 1 (the taps past N are zero).
      * first grows with k, so the interior outputs (0 <= first, first + width <= n) are one
      * range [k_lo, k_hi): b_k = floor(k p / q) >= N/2 - 1 and b_k <= n + N/2 - 1 - width. */
-    size_t k_lo = n_out, k_hi = 0;
+    size_t k_lo = k1, k_hi = 0;
     const ptrdiff_t b_min = nt / 2 - 1, b_max = (ptrdiff_t)n + nt / 2 - 1 - wd;
     if (r->exact && b_max >= b_min) {
         k_lo = (size_t)(((uint64_t)b_min * r->q + r->p - 1) / r->p);
         k_hi = (size_t)((((uint64_t)b_max + 1) * r->q - 1) / r->p + 1);
-        if (k_hi > n_out)
-            k_hi = n_out;
+        k_lo = k_lo > k0 ? k_lo : k0;
+        k_hi = k_hi < k1 ? k_hi : k1;
     }
     pos_t s;
     pos_init(r, &s);
-    for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {
+    const uint64_t t0 = (uint64_t)k0 * r->p;
+    s.b = (ptrdiff_t)(t0 / r->q);
+    s.rem = t0 % r->q;
+    for (size_t k = k0; k < k1; k++, pos_next(r, &s)) {
         if (k == k_lo && k_lo < k_hi) {
-            kern->resample_run(r->bankf, wd, x + (s.b - nt / 2 + 1), (int)s.rem, (int)s.step_int,
-                               (int)s.step_rem, (int)r->q, k_hi - k_lo, y + k_lo);
+            kern->resample_run(r->bankf, wd, x + (s.b - nt / 2 + 1 - (ptrdiff_t)x0), (int)s.rem,
+                               (int)s.step_int, (int)s.step_rem, (int)r->q, k_hi - k_lo,
+                               y + (k_lo - k0));
             /* jump to output k_hi - 1; the loop's pos_next() moves to k_hi */
             k = k_hi - 1;
             const uint64_t t = (uint64_t)k * r->p;
@@ -263,24 +293,28 @@ void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) 
         const float *win;
         ptrdiff_t first = s.b - nt / 2 + 1;
         if (first >= 0 && first + wd <= (ptrdiff_t)n) {
-            win = x + first;
+            win = x + (first - (ptrdiff_t)x0);
         } else {
             for (int i = 0; i < nt; i++)
-                edge_[i] = x[mirror(first + i, n)];
+                edge_[i] = x[mirror(first + i, n) - x0];
             win = edge_; /* edge_[nt .. wd) stay zero */
         }
         const float *h1 = r->bankf + (size_t)s.m * wd;
-        float v1 = r->dot(h1, win, wd);
+        float v1 = kern->resample_dot(h1, win, wd);
         if (r->exact) {
-            y[k] = v1;
+            y[k - k0] = v1;
         } else {
-            float v2 = r->dot(h1 + wd, win, wd);
+            float v2 = kern->resample_dot(h1 + wd, win, wd);
             float a = (float)((double)s.fr / (double)r->q);
             float d = v2 - v1;
             float t = d * a;
-            y[k] = v1 + t;
+            y[k - k0] = v1 + t;
         }
     }
+}
+
+void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) {
+    af_resample_f32_range(r, x, 0, n, 0, af_resampler_out_len(r, n), y);
 }
 
 void af_resample_f64(const af_resampler *r, const double *x, size_t n, double *y) {

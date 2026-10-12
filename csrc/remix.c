@@ -90,18 +90,15 @@ static int16_t clip16(int64_t v) {
 }
 
 /* float -> s16, x already scaled by 32768: round half to even, saturate. Out of int32 range or
- * NaN gives -32768, like ffmpeg's SIMD conversion (its scalar tail differs; docs/load.md). */
-static int16_t sat16f(float x) {
-    if (!(x >= -2147483648.0f && x < 2147483648.0f)) /* NaN, or rint(x) outside int32 */
-        return INT16_MIN;
-    if (x >= 32767.0f)
-        return INT16_MAX;
-    if (x <= -32768.0f)
-        return INT16_MIN;
+ * NaN gives -32768, like ffmpeg's SIMD conversion (its scalar tail differs; docs/load.md).
+ * Returns the s16 value as a float, with selects only, so that loops over it vectorize. */
+static float q16f(float x) {
+    float c = x >= 32767.0f ? 32767.0f : x;
+    c = c <= -32768.0f ? -32768.0f : c;                           /* NaN stays NaN here ... */
+    c = x >= -2147483648.0f && x < 2147483648.0f ? c : -32768.0f; /* ... and becomes -32768 */
     /* round half to even without libm (nearbyintf is a call on baseline x86-64): exact for
-     * |x| < 2^22 in the default rounding mode; -ffp-contract=off keeps the two steps apart */
-    float r = (x + 12582912.0f) - 12582912.0f;
-    return (int16_t)r;
+     * |c| < 2^22 in the default rounding mode; -ffp-contract=off keeps the two steps apart */
+    return (c + 12582912.0f) - 12582912.0f;
 }
 
 /* double -> s16 as ffmpeg's scalar conversion: a 64-bit lrint (out of range / NaN gives
@@ -135,12 +132,11 @@ static path_t select_path(const af_decoded *d, int resample) {
 
 static const size_t elem_size[] = {sizeof(int32_t), sizeof(int32_t), sizeof(float), sizeof(double)};
 
-/* Channel c of d in the path's working type, into dst (n_frames elements). */
-/* Channel c of d in the path's working type, into dst (n_frames elements). One loop per
- * (path, format) pair so the inner loops are branch-free. */
+/* Frames [lo, lo + n) of channel c of d in the path's working type, into dst (n elements).
+ * One loop per (path, format) pair so the inner loops are branch-free. */
 #define EXTRACT_LOOP(TYPE_IN, TYPE_OUT, EXPR)                                                      \
     do {                                                                                           \
-        const TYPE_IN *src_ = (const TYPE_IN *)d->data + c;                                        \
+        const TYPE_IN *src_ = (const TYPE_IN *)d->data + lo * ch + c;                              \
         TYPE_OUT *dst_ = dst;                                                                      \
         for (size_t i = 0; i < n; i++) {                                                           \
             TYPE_IN v = src_[i * ch];                                                              \
@@ -148,8 +144,8 @@ static const size_t elem_size[] = {sizeof(int32_t), sizeof(int32_t), sizeof(floa
         }                                                                                          \
     } while (0)
 
-static void extract(const af_decoded *d, path_t path, int c, void *dst) {
-    const size_t n = d->n_frames, ch = (size_t)d->channels;
+static void extract(const af_decoded *d, path_t path, int c, size_t lo, size_t n, void *dst) {
+    const size_t ch = (size_t)d->channels;
     switch (path) {
     case PATH_INT16:
         if (d->fmt == AF_SFMT_U8)
@@ -174,24 +170,38 @@ static void extract(const af_decoded *d, path_t path, int c, void *dst) {
     }
 }
 
-/* Mix planar channels (n samples each) to mono float32 = s16 / 32768. */
+#define MIX_BLOCK 256
+
+/* Mix planar channels (n samples each) to mono float32 = s16 / 32768. Works in blocks of
+ * MIX_BLOCK samples with the channel loop outside the sample loop, so the sample loops
+ * vectorize; every sample sees the same operations in the same order. out may be chan[0]:
+ * a block is read completely before it is written. */
 static void mix(path_t path, void *const *chan, int ch, const double *w, size_t n, float *out) {
     if (path == PATH_INT16 || path == PATH_S32_SHIFT) {
-        /* Q15 weights, rounded shift, wraps instead of saturating */
-        int64_t q[AF_MAX_CHANNELS];
+        if (ch == 1) {
+            const int32_t *src = chan[0];
+            for (size_t i = 0; i < n; i++)
+                out[i] = s16_to_float(wrap16(src[i]));
+            return;
+        }
+        /* Q15 weights, rounded shift, wraps instead of saturating. Samples and weights are
+         * within [-32768, 32768], so each product fits in int32. */
+        int32_t q[AF_MAX_CHANNELS];
         for (int c = 0; c < ch; c++)
-            q[c] = (int64_t)nearbyint(w[c] * 32768.0);
-        for (size_t i = 0; i < n; i++) {
-            int64_t v;
-            if (ch == 1) {
-                v = ((const int32_t *)chan[0])[i];
-            } else {
-                int64_t acc = 16384;
-                for (int c = 0; c < ch; c++)
-                    acc += (int64_t)((const int32_t *)chan[c])[i] * q[c];
-                v = floor_shift(acc, 15);
+            q[c] = (int32_t)nearbyint(w[c] * 32768.0);
+        int64_t acc[MIX_BLOCK];
+        for (size_t i0 = 0; i0 < n; i0 += MIX_BLOCK) {
+            const size_t len = n - i0 < MIX_BLOCK ? n - i0 : MIX_BLOCK;
+            for (size_t i = 0; i < len; i++)
+                acc[i] = 16384;
+            for (int c = 0; c < ch; c++) {
+                const int32_t *src = (const int32_t *)chan[c] + i0;
+                const int32_t qc = q[c];
+                for (size_t i = 0; i < len; i++)
+                    acc[i] += (int64_t)(src[i] * qc);
             }
-            out[i] = s16_to_float(wrap16(v));
+            for (size_t i = 0; i < len; i++)
+                out[i0 + i] = s16_to_float(wrap16(floor_shift(acc[i], 15)));
         }
     } else if (path == PATH_DOUBLE) {
         for (size_t i = 0; i < n; i++) {
@@ -206,19 +216,30 @@ static void mix(path_t path, void *const *chan, int ch, const double *w, size_t 
             out[i] = s16_to_float(sat16d(acc * 32768.0));
         }
     } else {
+        if (ch == 1) {
+            const float *src = chan[0];
+            for (size_t i = 0; i < n; i++)
+                out[i] = q16f(src[i] * 32768.0f) / 32768.0f;
+            return;
+        }
         float wf[AF_MAX_CHANNELS];
         for (int c = 0; c < ch; c++)
             wf[c] = (float)w[c];
-        for (size_t i = 0; i < n; i++) {
-            float acc = ((const float *)chan[0])[i];
-            if (ch > 1) {
-                acc = 0.0f;
-                for (int c = 0; c < ch; c++) {
-                    float p = ((const float *)chan[c])[i] * wf[c];
-                    acc = acc + p; /* separate statements: no FMA contraction */
+        float acc[MIX_BLOCK];
+        for (size_t i0 = 0; i0 < n; i0 += MIX_BLOCK) {
+            const size_t len = n - i0 < MIX_BLOCK ? n - i0 : MIX_BLOCK;
+            for (size_t i = 0; i < len; i++)
+                acc[i] = 0.0f;
+            for (int c = 0; c < ch; c++) {
+                const float *src = (const float *)chan[c] + i0;
+                const float wc = wf[c];
+                for (size_t i = 0; i < len; i++) {
+                    float p = src[i] * wc;
+                    acc[i] = acc[i] + p; /* separate statements: no FMA contraction */
                 }
             }
-            out[i] = s16_to_float(sat16f(acc * 32768.0f));
+            for (size_t i = 0; i < len; i++)
+                out[i0 + i] = q16f(acc[i] * 32768.0f) / 32768.0f;
         }
     }
 }
@@ -248,12 +269,58 @@ static void mono_direct(const af_decoded *d, path_t path, float *out) {
         MONO_LOOP(int32_t, s16_to_float(wrap16(floor_shift(v, 16))));
         break;
     case PATH_FLOAT: /* only f32 reaches here: s16 / s32 mono take the integer paths */
-        MONO_LOOP(float, s16_to_float(sat16f(v * 32768.0f)));
+        MONO_LOOP(float, q16f(v * 32768.0f) / 32768.0f);
         break;
     case PATH_DOUBLE:
         MONO_LOOP(double, s16_to_float(sat16d(v * 32768.0)));
         break;
     }
+}
+
+#define PIPE_BLOCK 2048 /* outputs per block of the extract -> resample -> mix pipeline */
+
+/* Float path with resampling, or any path without: block by block, so that the per-channel
+ * input and output blocks stay in cache instead of going through full-length buffers. */
+static int to_mono_blocked(const af_decoded *d, path_t path, const af_resampler *rs,
+                           const double *w, size_t m, float *res) {
+    const int ch = d->channels;
+    const size_t n = d->n_frames, es = elem_size[path];
+    size_t tmp_len = 0;
+    if (rs) /* path is PATH_FLOAT */
+        for (size_t k0 = 0; k0 < m; k0 += PIPE_BLOCK) {
+            size_t lo, hi;
+            af_resampler_span(rs, n, k0, k0 + (m - k0 < PIPE_BLOCK ? m - k0 : PIPE_BLOCK), &lo,
+                              &hi);
+            tmp_len = hi - lo > tmp_len ? hi - lo : tmp_len;
+        }
+    float *tmp = rs ? malloc(tmp_len > 0 ? tmp_len * sizeof(float) : 1) : NULL;
+    char *blk = malloc((size_t)ch * PIPE_BLOCK * es);
+    if ((rs && !tmp) || !blk) {
+        free(tmp);
+        free(blk);
+        return AF_ENOMEM;
+    }
+    void *chan[AF_MAX_CHANNELS];
+    for (int c = 0; c < ch; c++)
+        chan[c] = blk + (size_t)c * PIPE_BLOCK * es;
+    for (size_t k0 = 0; k0 < m; k0 += PIPE_BLOCK) {
+        const size_t k1 = m - k0 < PIPE_BLOCK ? m : k0 + PIPE_BLOCK;
+        if (rs) {
+            size_t lo, hi;
+            af_resampler_span(rs, n, k0, k1, &lo, &hi);
+            for (int c = 0; c < ch; c++) {
+                extract(d, path, c, lo, hi - lo, tmp);
+                af_resample_f32_range(rs, tmp, lo, n, k0, k1, chan[c]);
+            }
+        } else {
+            for (int c = 0; c < ch; c++)
+                extract(d, path, c, k0, k1 - k0, chan[c]);
+        }
+        mix(path, chan, ch, w, k1 - k0, res + k0);
+    }
+    free(tmp);
+    free(blk);
+    return AF_OK;
 }
 
 int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out) {
@@ -278,31 +345,39 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
         return rc;
     size_t m = resample ? af_resampler_out_len(rs, n) : n;
     const size_t es = elem_size[path];
+    double w[AF_MAX_CHANNELS];
+    af_downmix_weights(d->layout, ch, w);
 
+    if (!resample || path == PATH_FLOAT) {
+        float *res = malloc(m > 0 ? m * sizeof(float) : 1);
+        rc = res ? to_mono_blocked(d, path, rs, w, m, res) : AF_ENOMEM;
+        if (rc == AF_OK) {
+            *out = res;
+            *n_out = m;
+        } else {
+            free(res);
+        }
+        af_resampler_destroy(rs);
+        return rc;
+    }
+
+    /* Resampled double and int16 paths: whole channels at a time. */
     void *chan[AF_MAX_CHANNELS] = {0};
-    void *tmp = NULL;
-    if (resample && !(tmp = malloc(n > 0 ? n * es : 1)))
+    void *tmp = malloc(n > 0 ? n * es : 1);
+    if (!tmp)
         rc = AF_ENOMEM;
     for (int c = 0; c < ch && rc == AF_OK; c++) {
         if (!(chan[c] = malloc(m > 0 ? m * es : 1))) {
             rc = AF_ENOMEM;
             break;
         }
-        if (!resample) {
-            extract(d, path, c, chan[c]);
-            continue;
-        }
-        extract(d, path, c, tmp);
-        if (path == PATH_FLOAT)
-            af_resample_f32(rs, tmp, n, chan[c]);
-        else if (path == PATH_DOUBLE)
+        extract(d, path, c, 0, n, tmp);
+        if (path == PATH_DOUBLE)
             af_resample_f64(rs, tmp, n, chan[c]);
         else
             af_resample_s16(rs, tmp, n, chan[c]);
     }
     if (rc == AF_OK) {
-        double w[AF_MAX_CHANNELS];
-        af_downmix_weights(d->layout, ch, w);
         /* The output reuses channel 0's buffer (one large allocation and its page faults
          * less): mix() reads every channel at i before writing out[i], and float elements
          * are never larger than the working type. */

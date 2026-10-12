@@ -27,6 +27,14 @@ size_t af_resampler_out_len(const af_resampler *r, size_t n);
 /* y must hold af_resampler_out_len(r, n) samples. */
 void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y);
 void af_resample_f64(const af_resampler *r, const double *x, size_t n, double *y);
+/* Outputs [k0, k1) of af_resample_f32() over a signal of n samples, of which x holds samples
+ * [x0, x0 + len): [x0, x0 + len) must contain the span af_resampler_span() gives. y receives
+ * k1 - k0 samples, bit for bit those of af_resample_f32(). */
+void af_resample_f32_range(const af_resampler *r, const float *x, size_t x0, size_t n, size_t k0,
+                           size_t k1, float *y);
+/* Input samples [*lo, *hi) that outputs [k0, k1) read (mirrored edges included). */
+void af_resampler_span(const af_resampler *r, size_t n, size_t k0, size_t k1, size_t *lo,
+                       size_t *hi);
 /* int16 path: s16-range integers in, saturated s16-range integers out. */
 void af_resample_s16(const af_resampler *r, const int32_t *x, size_t n, int32_t *y);
 
