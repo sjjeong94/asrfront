@@ -1,6 +1,6 @@
 """Repeat the frontend benchmarks without audio decoding or multi-threaded references.
 
-    .venv/bin/python bench/current_environment.py --json results.json
+.venv/bin/python bench/current_environment.py --json results.json
 """
 
 import argparse
