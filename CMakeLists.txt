@@ -33,18 +33,29 @@ function(asrfront_c_options target)
   endif()
 endfunction()
 
+# Kernel hot loops are tiny (the resampler's FMA loop is 17 bytes): one that straddles a
+# 64-byte boundary ran 20-30% slower, so speed depended on where the linker put it. Align them.
+include(CheckCCompilerFlag)
+check_c_compiler_flag(-falign-loops=32 ASRFRONT_HAVE_ALIGN_LOOPS)
+function(asrfront_kernel_options target)
+  asrfront_c_options(${target})
+  if(ASRFRONT_HAVE_ALIGN_LOOPS)
+    target_compile_options(${target} PRIVATE -falign-loops=32)
+  endif()
+endfunction()
+
 # SIMD kernels: the same source compiled per ISA, selected at runtime (kernels.c).
 # No FMA flags anywhere, so every variant gives bit-identical results.
 add_library(asrfront_kernels_generic OBJECT csrc/kernels_impl.c)
 target_compile_definitions(asrfront_kernels_generic PRIVATE AF_ISA=generic)
-asrfront_c_options(asrfront_kernels_generic)
+asrfront_kernel_options(asrfront_kernels_generic)
 set(ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_kernels_generic>)
 
 # Plain-C variant (no vector extensions), i.e. the MSVC code path; selectable with
 # ASRFRONT_KERNELS=scalar so it is tested on every platform.
 add_library(asrfront_kernels_scalar OBJECT csrc/kernels_impl.c)
 target_compile_definitions(asrfront_kernels_scalar PRIVATE AF_ISA=scalar AF_NO_VECTOR_EXT=1)
-asrfront_c_options(asrfront_kernels_scalar)
+asrfront_kernel_options(asrfront_kernels_scalar)
 list(APPEND ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_kernels_scalar>)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$")
@@ -56,7 +67,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x64)$")
     # -mfma only lets explicit fmaf() calls use vfmadd (-ffp-contract=off forbids contraction).
     target_compile_options(asrfront_kernels_avx2 PRIVATE -mavx2 -mfma)
   endif()
-  asrfront_c_options(asrfront_kernels_avx2)
+  asrfront_kernel_options(asrfront_kernels_avx2)
   list(APPEND ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_kernels_avx2>)
   set(ASRFRONT_HAVE_AVX2 ON)
 endif()
