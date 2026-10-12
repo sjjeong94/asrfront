@@ -36,12 +36,11 @@ All values are medians of three best-time measurements, in milliseconds.
 | 4 | 24.706 | 28.081 |
 | 8 | 22.121 | 28.559 |
 
-Raw after measurements: [Python API JSON](benchmarks/macos-arm64-2026-10-12-optimized.json).
 Reproduce after rebuilding the extension:
 
 ```bash
 uv sync --offline
-.venv/bin/python bench/current_environment.py --json docs/benchmarks/macos-arm64-2026-10-12-optimized.json
+.venv/bin/python bench/current_environment.py --json results.json
 ```
 
 ### Isolated C measurements by stage
@@ -63,7 +62,6 @@ FFT + power alone decreased from 1.374 to 1.233 ms for 400 points, and from
 relative to the FFT-only version with CMVN. The negligible Whisper difference
 between the last two rows is measurement variation.
 
-Raw stage outputs: [C benchmark JSON](benchmarks/macos-arm64-2026-10-12-optimization-stages.json).
 The final C benchmark also reports CMVN timing:
 
 ```bash
@@ -98,7 +96,7 @@ The Intel/WSL measurements below are historical results from a different environ
 ### Method and reproduction
 
 ```bash
-.venv/bin/python bench/current_environment.py --json docs/benchmarks/macos-arm64-2026-10-12.json
+.venv/bin/python bench/current_environment.py --json results.json
 ```
 
 The runner reuses `bench/compare.py`: one warm-up, then the best wall-clock time
@@ -117,8 +115,6 @@ and synthetic CMVN shift=-10/scale=0.3 (560 dimensions), except `fbank_raw`
 and batch calls, which omit CMVN in the existing comparison runner.
 Batch inputs are 32 references to the same 30 s waveform, rather than 32 separately
 allocated recordings; batch output allocation and thread scheduling are included.
-
-Raw measurements: [JSON](benchmarks/macos-arm64-2026-10-12.json).
 
 ### Single input: 30 s
 
