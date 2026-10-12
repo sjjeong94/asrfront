@@ -560,7 +560,7 @@ static void whisper_normalize(float *x, size_t n) {
  * in every build; with -mfma (the avx2 table) the lane loop becomes one vfmadd per 8 taps. */
 #if defined(__AVX__) && defined(__FMA__)
 #include <immintrin.h>
-static float resample_dot(const float *h, const float *x, int width) {
+VINLINE float resample_dot_inl(const float *h, const float *x, int width) {
     __m256 acc = _mm256_setzero_ps();
     for (int i = 0; i < width; i += 8)
         acc = _mm256_fmadd_ps(_mm256_loadu_ps(h + i), _mm256_loadu_ps(x + i), acc);
@@ -569,28 +569,8 @@ static float resample_dot(const float *h, const float *x, int width) {
     __m128 t = _mm_add_ps(s, _mm_movehl_ps(s, s));                              /* s0+s2, s1+s3 */
     return _mm_cvtss_f32(_mm_add_ss(t, _mm_shuffle_ps(t, t, 1)));               /* t0 + t1 */
 }
-
-static float reduce8(__m256 acc) {
-    __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
-    __m128 t = _mm_add_ps(s, _mm_movehl_ps(s, s));
-    return _mm_cvtss_f32(_mm_add_ss(t, _mm_shuffle_ps(t, t, 1)));
-}
-
-static void resample_dot4(const float *const *h, const float *const *x, int width, float *out) {
-    __m256 a0 = _mm256_setzero_ps(), a1 = a0, a2 = a0, a3 = a0;
-    for (int i = 0; i < width; i += 8) {
-        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(h[0] + i), _mm256_loadu_ps(x[0] + i), a0);
-        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(h[1] + i), _mm256_loadu_ps(x[1] + i), a1);
-        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(h[2] + i), _mm256_loadu_ps(x[2] + i), a2);
-        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(h[3] + i), _mm256_loadu_ps(x[3] + i), a3);
-    }
-    out[0] = reduce8(a0);
-    out[1] = reduce8(a1);
-    out[2] = reduce8(a2);
-    out[3] = reduce8(a3);
-}
 #else
-static float resample_dot(const float *h, const float *x, int width) {
+VINLINE float resample_dot_inl(const float *h, const float *x, int width) {
     float acc[8] = {0};
     for (int i = 0; i < width; i += 8)
         for (int l = 0; l < 8; l++)
@@ -599,14 +579,26 @@ static float resample_dot(const float *h, const float *x, int width) {
     float t0 = s0 + s2, t1 = s1 + s3;
     return t0 + t1;
 }
-
-static void resample_dot4(const float *const *h, const float *const *x, int width, float *out) {
-    for (int j = 0; j < 4; j++)
-        out[j] = resample_dot(h[j], x[j], width);
-}
 #endif
 
+static float resample_dot(const float *h, const float *x, int width) {
+    return resample_dot_inl(h, x, width);
+}
+
+static void resample_run(const float *bank, int width, const float *x, int m, int step_int,
+                         int step_rem, int q, size_t count, float *y) {
+    for (size_t k = 0; k < count; k++) {
+        y[k] = resample_dot_inl(bank + (size_t)m * width, x, width);
+        x += step_int;
+        m += step_rem;
+        if (m >= q) {
+            m -= q;
+            x++;
+        }
+    }
+}
+
 const af_kernels AF_CAT(af_kernels, AF_ISA) = {
-    AF_STR(AF_ISA), rfft_power, gather_packed,     gather_scaled, mel,           log10_floor,
-    log_floor,      kaldi_prep, whisper_normalize, resample_dot,  resample_dot4,
+    AF_STR(AF_ISA), rfft_power, gather_packed,     gather_scaled, mel,          log10_floor,
+    log_floor,      kaldi_prep, whisper_normalize, resample_dot,  resample_run,
 };

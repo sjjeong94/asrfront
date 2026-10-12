@@ -55,9 +55,13 @@ typedef struct af_kernels {
      * accumulators and a fixed reduction tree (docs/load.md). The only kernel that uses FMA,
      * through fmaf(), which is correctly rounded: identical in every build. */
     float (*resample_dot)(const float *h, const float *x, int width);
-    /* Four independent resample_dot()s at once (hides the FMA latency): out[j] =
-     * resample_dot(h[j], x[j], width), bit for bit. */
-    void (*resample_dot4)(const float *const *h, const float *const *x, int width, float *out);
+    /* A run of interior outputs of the exact-phase resampler, bit for bit resample_dot():
+     * y[k] = resample_dot(bank + m_k * width, x + b_k, width) for k < count, starting at
+     * b_0 = 0 and m_0 = m, then b += step_int, m += step_rem and, when m >= q, m -= q and
+     * b += 1. One loop with the dot product inlined, so the out-of-order core overlaps
+     * successive outputs. */
+    void (*resample_run)(const float *bank, int width, const float *x, int m, int step_int,
+                         int step_rem, int q, size_t count, float *y);
 } af_kernels;
 
 /* Best table for this CPU. ASRFRONT_KERNELS=generic forces the baseline build,

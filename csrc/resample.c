@@ -235,18 +235,34 @@ void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) 
     const af_kernels *kern = af_kernels_select();
     /* N <= ceil(32 * sr / (0.97 * 16000)), rounded up to a multiple of 8 */
     float edge_[AF_RESAMPLE_MAX_RATE / 485 + 16] = {0};
-    const float *bh[4], *bx[4]; /* exact mode: interior outputs are computed 4 at a time */
-    size_t bk[4];
-    int nb = 0;
+    /* The kernel reads `width` samples from first = b - N/2 + 1 (the taps past N are zero).
+     * first grows with k, so the interior outputs (0 <= first, first + width <= n) are one
+     * range [k_lo, k_hi): b_k = floor(k p / q) >= N/2 - 1 and b_k <= n + N/2 - 1 - width. */
+    size_t k_lo = n_out, k_hi = 0;
+    const ptrdiff_t b_min = nt / 2 - 1, b_max = (ptrdiff_t)n + nt / 2 - 1 - wd;
+    if (r->exact && b_max >= b_min) {
+        k_lo = (size_t)(((uint64_t)b_min * r->q + r->p - 1) / r->p);
+        k_hi = (size_t)((((uint64_t)b_max + 1) * r->q - 1) / r->p + 1);
+        if (k_hi > n_out)
+            k_hi = n_out;
+    }
     pos_t s;
     pos_init(r, &s);
     for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {
+        if (k == k_lo && k_lo < k_hi) {
+            kern->resample_run(r->bankf, wd, x + (s.b - nt / 2 + 1), (int)s.rem, (int)s.step_int,
+                               (int)s.step_rem, (int)r->q, k_hi - k_lo, y + k_lo);
+            /* jump to output k_hi - 1; the loop's pos_next() moves to k_hi */
+            k = k_hi - 1;
+            const uint64_t t = (uint64_t)k * r->p;
+            s.b = (ptrdiff_t)(t / r->q);
+            s.rem = t % r->q;
+            continue;
+        }
         pos_phase(r, &s);
         const float *win;
-        /* the kernel reads `width` samples; the taps past N are zero */
         ptrdiff_t first = s.b - nt / 2 + 1;
-        int interior = first >= 0 && first + wd <= (ptrdiff_t)n;
-        if (interior) {
+        if (first >= 0 && first + wd <= (ptrdiff_t)n) {
             win = x + first;
         } else {
             for (int i = 0; i < nt; i++)
@@ -254,19 +270,6 @@ void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) 
             win = edge_; /* edge_[nt .. wd) stay zero */
         }
         const float *h1 = r->bankf + (size_t)s.m * wd;
-        if (r->exact && interior) {
-            bh[nb] = h1;
-            bx[nb] = win;
-            bk[nb++] = k;
-            if (nb == 4) {
-                float v[4];
-                kern->resample_dot4(bh, bx, wd, v);
-                for (int j = 0; j < 4; j++)
-                    y[bk[j]] = v[j];
-                nb = 0;
-            }
-            continue;
-        }
         float v1 = r->dot(h1, win, wd);
         if (r->exact) {
             y[k] = v1;
@@ -278,8 +281,6 @@ void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) 
             y[k] = v1 + t;
         }
     }
-    for (int j = 0; j < nb; j++)
-        y[bk[j]] = r->dot(bh[j], bx[j], wd);
 }
 
 void af_resample_f64(const af_resampler *r, const double *x, size_t n, double *y) {

@@ -223,6 +223,39 @@ static void mix(path_t path, void *const *chan, int ch, const double *w, size_t 
     }
 }
 
+/* Mono without resampling: extract() and mix() fused into one pass straight into the float
+ * output, element for element the same expressions (mix() of one channel is the identity
+ * before the conversion). */
+#define MONO_LOOP(TYPE_IN, EXPR)                                                                   \
+    do {                                                                                           \
+        const TYPE_IN *src_ = (const TYPE_IN *)d->data;                                            \
+        for (size_t i = 0; i < n; i++) {                                                           \
+            TYPE_IN v = src_[i];                                                                   \
+            out[i] = (EXPR);                                                                       \
+        }                                                                                          \
+    } while (0)
+
+static void mono_direct(const af_decoded *d, path_t path, float *out) {
+    const size_t n = d->n_frames;
+    switch (path) {
+    case PATH_INT16:
+        if (d->fmt == AF_SFMT_U8)
+            MONO_LOOP(uint8_t, s16_to_float(wrap16(((int32_t)v - 128) * 256)));
+        else
+            MONO_LOOP(int16_t, s16_to_float(wrap16(v)));
+        break;
+    case PATH_S32_SHIFT:
+        MONO_LOOP(int32_t, s16_to_float(wrap16(floor_shift(v, 16))));
+        break;
+    case PATH_FLOAT: /* only f32 reaches here: s16 / s32 mono take the integer paths */
+        MONO_LOOP(float, s16_to_float(sat16f(v * 32768.0f)));
+        break;
+    case PATH_DOUBLE:
+        MONO_LOOP(double, s16_to_float(sat16d(v * 32768.0)));
+        break;
+    }
+}
+
 int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out) {
     const int ch = d->channels;
     const size_t n = d->n_frames;
@@ -232,6 +265,15 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
     int rc = AF_OK;
     *out = NULL;
     *n_out = 0;
+    if (ch == 1 && !resample) {
+        float *res = malloc(n > 0 ? n * sizeof(float) : 1);
+        if (!res)
+            return AF_ENOMEM;
+        mono_direct(d, path, res);
+        *out = res;
+        *n_out = n;
+        return AF_OK;
+    }
     if (resample && (rc = af_resampler_create(d->sample_rate, sr_out, &rs)) != AF_OK)
         return rc;
     size_t m = resample ? af_resampler_out_len(rs, n) : n;
