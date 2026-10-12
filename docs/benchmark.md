@@ -1,6 +1,90 @@
 # Benchmark
 
-## Current environment: Apple M1 (2026-10-12)
+## Apple M1 optimization results (2026-10-12)
+
+The three changes were evaluated in order: a NEON 4×4 transpose for Whisper's
+frame gather, fixed 400/512-point FFT stage schedules on aarch64, and fused
+SenseVoice LFR copy + CMVN. Arithmetic order is preserved; FMA contraction remains
+disabled. The scalar and x86 FFT/gather paths retain their previous implementation.
+A NEON transpose for SenseVoice's scaled gather was also tried, but increased
+latency and was discarded.
+
+### Python API: before and after
+
+Same environment, speech input and three-pass methodology as the original M1 run
+below. The baseline is commit `e4c545e`; after measurements use the working changes.
+All values are medians of three best-time measurements, in milliseconds.
+
+| 30 s function | Before | After | After range | Time reduction |
+|---|---:|---:|---:|---:|
+| `whisper.log_mel` | 2.866 | 2.525 | 2.525–2.526 | 11.9% |
+| `sensevoice.fbank + CMVN` | 3.462 | 3.312 | 3.312–3.313 | 4.3% |
+| `sensevoice.fbank_raw` | 3.372 | 3.260 | 3.260–3.265 | 3.3% |
+
+| Audio length | Whisper after (ms) | SenseVoice + CMVN after (ms) |
+|---|---:|---:|
+| 1 s | 0.091 | 0.122 |
+| 5 s | 0.427 | 0.563 |
+| 10 s | 0.844 | 1.110 |
+| 30 s | 2.523 | 3.312 |
+| 120 s | 10.175 | 13.265 |
+
+| Batch threads (32 × 30 s) | Whisper after (ms) | SenseVoice after, no CMVN (ms) |
+|---|---:|---:|
+| 1 | 87.973 | 106.364 |
+| 2 | 43.915 | 54.052 |
+| 4 | 24.706 | 28.081 |
+| 8 | 22.121 | 28.559 |
+
+Raw after measurements: [Python API JSON](benchmarks/macos-arm64-2026-10-12-optimized.json).
+Reproduce after rebuilding the extension:
+
+```bash
+uv sync --offline
+.venv/bin/python bench/current_environment.py --json docs/benchmarks/macos-arm64-2026-10-12-optimized.json
+```
+
+### Isolated C measurements by stage
+
+Synthetic 30 s waveform from `bench/bench_frontend.c`, output buffers reused,
+best of 50 calls per measurement, median of three interleaved passes. These timings
+are distinct from the Python/JFK timings above. The CMVN comparison uses the same
+final kernels with only the LFR/CMVN implementation changed.
+
+| Stage | Whisper (ms) | SenseVoice without CMVN (ms) | SenseVoice with CMVN (ms) |
+|---|---:|---:|---:|
+| Baseline | 2.861 | 3.399 | — |
+| Whisper NEON gather | 2.605 | 3.396 | — |
+| Fixed FFT schedules | 2.521 | 3.285 | 3.342 |
+| Fused LFR + CMVN | 2.522 | 3.285 | 3.303 |
+
+FFT + power alone decreased from 1.374 to 1.233 ms for 400 points, and from
+1.584 to 1.382 ms for 512 points. CMVN fusion reduces about 0.039 ms (1.2%)
+relative to the FFT-only version with CMVN. The negligible Whisper difference
+between the last two rows is measurement variation.
+
+Raw stage outputs: [C benchmark JSON](benchmarks/macos-arm64-2026-10-12-optimization-stages.json).
+The final C benchmark also reports CMVN timing:
+
+```bash
+.venv/bin/cmake -S . -B /private/tmp/asrfront-perf-review -DASRFRONT_BUILD_BENCH=ON -DASRFRONT_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+.venv/bin/cmake --build /private/tmp/asrfront-perf-review -j 4
+/private/tmp/asrfront-perf-review/bench_frontend
+.venv/bin/ctest --test-dir /private/tmp/asrfront-perf-review --output-on-failure
+```
+
+Validation: C tests **3/3 passed**; Python Whisper, SenseVoice and kernel tests
+**181 passed, 29 skipped**. Kernel tests compare default NEON results with scalar
+results exactly. Twenty new CMVN cases check exact float32 results across short
+inputs, boundary padding, 80/128 mel bins and different LFR configurations.
+Optional reference-library cases remain skipped. Performance was measured on this
+M1 only; improvements on other aarch64 CPUs and the CMVN change on x86 are unmeasured.
+
+## Original Apple M1 baseline (2026-10-12)
+
+The measurements in this section precede optimization. Reproducing this baseline
+requires the source at commit `e4c545e`; running the commands with current sources
+measures the optimized implementation instead.
 
 Measured locally on a MacBook Air (MacBookAir10,1), Apple M1 with 4 performance
 and 4 efficiency cores, 8 GB RAM, macOS 26.5.2 arm64. The installed extension

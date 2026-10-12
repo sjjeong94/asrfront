@@ -80,6 +80,18 @@ def test_lfr_params(sigs, lfr_m, lfr_n):
     assert_close(actual, expected, ATOL, f"lfr {lfr_m}/{lfr_n}")
 
 
+@pytest.mark.parametrize("n_samples", [0, 399, 400, 1000, 16001])
+@pytest.mark.parametrize("n_mels,lfr_m,lfr_n", [(80, 7, 6), (128, 8, 2), (80, 3, 7), (80, 1, 1)])
+def test_cmvn_preserves_separate_float32_operations(n_samples, n_mels, lfr_m, lfr_n):
+    """Fusing the LFR copy with CMVN must retain exact float32 results at edges."""
+    audio = np.random.default_rng(42).uniform(-0.5, 0.5, n_samples).astype(np.float32)
+    shift, scale = _synthetic_cmvn(n_mels * lfr_m)
+    params = dict(n_mels=n_mels, lfr_m=lfr_m, lfr_n=lfr_n)
+    unnormalized = asrfront.sensevoice.fbank(audio, **params)
+    actual = asrfront.sensevoice.fbank(audio, cmvn=(shift, scale), **params)
+    np.testing.assert_array_equal(actual, (unnormalized + shift) * scale)
+
+
 @pytest.mark.parametrize("name", ["speech", "chirp", "white_noise", "dc_offset"])
 def test_fbank_matches_torchaudio(sigs, name):
     """End to end vs. FunASR's float32 torchaudio call (see test_reference for why 2e-3)."""

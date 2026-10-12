@@ -227,11 +227,16 @@ int af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, 
         for (ptrdiff_t j = 0; j < m; j++) {
             ptrdiff_t src = (ptrdiff_t)i * n - left + j;
             src = src < 0 ? 0 : (src > last ? last : src);
-            memcpy(row + (size_t)j * n_mels, h->raw + (size_t)src * n_mels, n_mels * sizeof(float));
+            const size_t offset = (size_t)j * n_mels;
+            const float *raw = h->raw + (size_t)src * n_mels;
+            if (shift) {
+                /* Copy and normalize together, preserving (x + shift) * scale. */
+                for (size_t d = 0; d < n_mels; d++)
+                    row[offset + d] = (raw[d] + shift[offset + d]) * scale[offset + d];
+            } else {
+                memcpy(row + offset, raw, n_mels * sizeof(float));
+            }
         }
-        if (shift)
-            for (size_t d = 0; d < dim; d++)
-                row[d] = (row[d] + shift[d]) * scale[d];
     }
     return AF_OK;
 }

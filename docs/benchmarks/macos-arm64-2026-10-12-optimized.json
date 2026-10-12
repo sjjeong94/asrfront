@@ -1,0 +1,141 @@
+{
+  "env": {
+    "python": "3.12.14",
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "kernels": "generic",
+    "cpus": "8",
+    "asrfront": "0.1.0",
+    "numpy": "2.5.3"
+  },
+  "runs": [
+    {
+      "whisper_30s_1thread": {
+        "asrfront (generic)": 2.5252080013160594
+      },
+      "sensevoice_30s_1thread": {
+        "asrfront (generic)": 3.3121250016847625
+      },
+      "kaldi_fbank_30s_1thread": {
+        "asrfront fbank_raw": 3.2649170025251806
+      },
+      "length_1s": {
+        "asrfront whisper.log_mel": 0.09070800297195092,
+        "asrfront sensevoice.fbank": 0.12241600052220747
+      },
+      "length_5s": {
+        "asrfront whisper.log_mel": 0.42758299969136715,
+        "asrfront sensevoice.fbank": 0.5632909960695542
+      },
+      "length_10s": {
+        "asrfront whisper.log_mel": 0.8437500000582077,
+        "asrfront sensevoice.fbank": 1.109624994569458
+      },
+      "length_30s": {
+        "asrfront whisper.log_mel": 2.523916002246551,
+        "asrfront sensevoice.fbank": 3.3116659978986718
+      },
+      "length_120s": {
+        "asrfront whisper.log_mel": 10.175041999900714,
+        "asrfront sensevoice.fbank": 13.258624996524304
+      },
+      "batch32_whisper.log_mel_batch": {
+        "1": 87.87645799748134,
+        "2": 43.890790999284945,
+        "4": 22.587667001062073,
+        "8": 21.928583999397233
+      },
+      "batch32_sensevoice.fbank_batch": {
+        "1": 106.38733399537159,
+        "2": 54.04462500155205,
+        "4": 28.08283299964387,
+        "8": 28.55870799976401
+      }
+    },
+    {
+      "whisper_30s_1thread": {
+        "asrfront (generic)": 2.524582996557001
+      },
+      "sensevoice_30s_1thread": {
+        "asrfront (generic)": 3.3127919959952123
+      },
+      "kaldi_fbank_30s_1thread": {
+        "asrfront fbank_raw": 3.2596669989288785
+      },
+      "length_1s": {
+        "asrfront whisper.log_mel": 0.09070800297195092,
+        "asrfront sensevoice.fbank": 0.12241600052220747
+      },
+      "length_5s": {
+        "asrfront whisper.log_mel": 0.42741699871839955,
+        "asrfront sensevoice.fbank": 0.5632910033455119
+      },
+      "length_10s": {
+        "asrfront whisper.log_mel": 0.843707995954901,
+        "asrfront sensevoice.fbank": 1.10954100091476
+      },
+      "length_30s": {
+        "asrfront whisper.log_mel": 2.523249997466337,
+        "asrfront sensevoice.fbank": 3.311458000098355
+      },
+      "length_120s": {
+        "asrfront whisper.log_mel": 10.171916997933295,
+        "asrfront sensevoice.fbank": 13.26975000120001
+      },
+      "batch32_whisper.log_mel_batch": {
+        "1": 87.97274999960791,
+        "2": 43.91504199884366,
+        "4": 24.980666996270884,
+        "8": 22.70779199898243
+      },
+      "batch32_sensevoice.fbank_batch": {
+        "1": 106.14079199876869,
+        "2": 54.07779200322693,
+        "4": 28.081167001801077,
+        "8": 32.83774999727029
+      }
+    },
+    {
+      "whisper_30s_1thread": {
+        "asrfront (generic)": 2.52583299879916
+      },
+      "sensevoice_30s_1thread": {
+        "asrfront (generic)": 3.312082997581456
+      },
+      "kaldi_fbank_30s_1thread": {
+        "asrfront fbank_raw": 3.2601249986328185
+      },
+      "length_1s": {
+        "asrfront whisper.log_mel": 0.09062500612344593,
+        "asrfront sensevoice.fbank": 0.1225829983013682
+      },
+      "length_5s": {
+        "asrfront whisper.log_mel": 0.4274160019122064,
+        "asrfront sensevoice.fbank": 0.5632910033455119
+      },
+      "length_10s": {
+        "asrfront whisper.log_mel": 0.8437500000582077,
+        "asrfront sensevoice.fbank": 1.109165998059325
+      },
+      "length_30s": {
+        "asrfront whisper.log_mel": 2.5230409955838695,
+        "asrfront sensevoice.fbank": 3.311583001050167
+      },
+      "length_120s": {
+        "asrfront whisper.log_mel": 10.176625000895001,
+        "asrfront sensevoice.fbank": 13.264916997286491
+      },
+      "batch32_whisper.log_mel_batch": {
+        "1": 88.00408300157869,
+        "2": 43.97491699637612,
+        "4": 24.706416996195912,
+        "8": 22.12116699956823
+      },
+      "batch32_sensevoice.fbank_batch": {
+        "1": 106.36433299805503,
+        "2": 54.05229199823225,
+        "4": 28.07250000478234,
+        "8": 28.04195800126763
+      }
+    }
+  ]
+}

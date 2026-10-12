@@ -53,6 +53,19 @@ int main(void) {
     printf("sensevoice fbank 30 s:       %6.3f ms\n",
            BEST_MS(af_sensevoice_fbank(s, audio, N_SAMPLES, sout)));
 
+    float shift[560], scale[560];
+    for (int i = 0; i < 560; i++) {
+        shift[i] = -10.0f;
+        scale[i] = 0.3f;
+    }
+    sc.cmvn_shift = shift;
+    sc.cmvn_scale = scale;
+    af_sensevoice *s_cmvn;
+    af_sensevoice_create(&sc, &s_cmvn);
+    printf("sensevoice fbank + CMVN:     %6.3f ms\n",
+           BEST_MS(af_sensevoice_fbank(s_cmvn, audio, N_SAMPLES, sout)));
+    af_sensevoice_destroy(s_cmvn);
+
     /* Stage breakdown for 3000 frames = 375 blocks of 8 */
     const af_kernels *k = af_kernels_select();
     const int blocks = 3000 / AF_VL;

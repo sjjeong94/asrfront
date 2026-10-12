@@ -63,8 +63,14 @@ VINLINE void vst(float *p, vn v) {
 /* Stockham FFT passes on split SoA buffers (same formulas as fft.c)                  */
 /* ---------------------------------------------------------------------------------- */
 
-static void pass2(int ns, int nb, int stride, const af_cpx *tw, const float *xr, const float *xi,
-                  float *yr, float *yi) {
+#if defined(AF_VEC_EXT) && defined(__aarch64__)
+#define FFT_INLINE VINLINE
+#else
+#define FFT_INLINE static
+#endif
+
+FFT_INLINE void pass2(int ns, int nb, int stride, const af_cpx *tw, const float *xr,
+                      const float *xi, float *yr, float *yi) {
     const size_t st = (size_t)stride * VL, o = (size_t)ns * VL;
     for (int b = 0; b < nb; b++) {
         for (int j = 0; j < ns; j++) {
@@ -113,8 +119,8 @@ static void pass3(int ns, int nb, int stride, const af_cpx *tw, const float *xr,
     }
 }
 
-static void pass4(int ns, int nb, int stride, const af_cpx *tw, const float *xr, const float *xi,
-                  float *yr, float *yi) {
+FFT_INLINE void pass4(int ns, int nb, int stride, const af_cpx *tw, const float *xr,
+                      const float *xi, float *yr, float *yi) {
     const size_t st = (size_t)stride * VL, o = (size_t)ns * VL;
     for (int b = 0; b < nb; b++) {
         for (int j = 0; j < ns; j++) {
@@ -145,8 +151,8 @@ static void pass4(int ns, int nb, int stride, const af_cpx *tw, const float *xr,
     }
 }
 
-static void pass5(int ns, int nb, int stride, const af_cpx *tw, const float *xr, const float *xi,
-                  float *yr, float *yi) {
+FFT_INLINE void pass5(int ns, int nb, int stride, const af_cpx *tw, const float *xr,
+                      const float *xi, float *yr, float *yi) {
     const float c1 = 0.309016994374947424102293417182819059f;
     const float c2 = -0.809016994374947424102293417182819059f;
     const float s1 = 0.951056516295153572116439333379382143f;
@@ -194,30 +200,46 @@ static void rfft_power(const af_rfft *p, float *re, float *im, float *scr_re, fl
                        float *power) {
     const int m = p->m;
     float *xr = re, *xi = im, *yr = scr_re, *yi = scr_im;
-    for (int s = 0; s < p->n_stages; s++) {
-        const af_fft_stage *st = &p->stages[s];
-        const int stride = m / st->radix;
-        const int nb = stride / st->ns;
-        switch (st->radix) {
-        case 2:
-            pass2(st->ns, nb, stride, st->tw, xr, xi, yr, yi);
-            break;
-        case 3:
-            pass3(st->ns, nb, stride, st->tw, xr, xi, yr, yi);
-            break;
-        case 4:
-            pass4(st->ns, nb, stride, st->tw, xr, xi, yr, yi);
-            break;
-        default:
-            pass5(st->ns, nb, stride, st->tw, xr, xi, yr, yi);
-            break;
+#if defined(AF_VEC_EXT) && defined(__aarch64__)
+    /* Fixed frontend sizes: same butterflies and operation order, with constant
+     * stage dimensions so the compiler can specialize indexing and loops.
+     * These schedules match fft.c factorize(): 4/2/5/5 and 4/4/4/4. */
+    if (m == 200) {
+        pass4(1, 50, 50, p->stages[0].tw, re, im, scr_re, scr_im);
+        pass2(4, 25, 100, p->stages[1].tw, scr_re, scr_im, re, im);
+        pass5(8, 5, 40, p->stages[2].tw, re, im, scr_re, scr_im);
+        pass5(40, 1, 40, p->stages[3].tw, scr_re, scr_im, re, im);
+    } else if (m == 256) {
+        pass4(1, 64, 64, p->stages[0].tw, re, im, scr_re, scr_im);
+        pass4(4, 16, 64, p->stages[1].tw, scr_re, scr_im, re, im);
+        pass4(16, 4, 64, p->stages[2].tw, re, im, scr_re, scr_im);
+        pass4(64, 1, 64, p->stages[3].tw, scr_re, scr_im, re, im);
+    } else
+#endif
+        for (int s = 0; s < p->n_stages; s++) {
+            const af_fft_stage *st = &p->stages[s];
+            const int stride = m / st->radix;
+            const int nb = stride / st->ns;
+            switch (st->radix) {
+            case 2:
+                pass2(st->ns, nb, stride, st->tw, xr, xi, yr, yi);
+                break;
+            case 3:
+                pass3(st->ns, nb, stride, st->tw, xr, xi, yr, yi);
+                break;
+            case 4:
+                pass4(st->ns, nb, stride, st->tw, xr, xi, yr, yi);
+                break;
+            default:
+                pass5(st->ns, nb, stride, st->tw, xr, xi, yr, yi);
+                break;
+            }
+            float *tr = xr, *ti = xi;
+            xr = yr;
+            xi = yi;
+            yr = tr;
+            yi = ti;
         }
-        float *tr = xr, *ti = xi;
-        xr = yr;
-        xi = yi;
-        yr = tr;
-        yi = ti;
-    }
 
     /* Split post-processing fused with |X|^2 (see af_rfft_forward). */
     for (int c = 0; c < VL; c += W) {
@@ -245,7 +267,7 @@ static void rfft_power(const af_rfft *p, float *re, float *im, float *scr_re, fl
 /* Frame gathers (AoS rows -> SoA lanes)                                              */
 /* ---------------------------------------------------------------------------------- */
 
-#if defined(AF_VEC_EXT) && W == 8 && VL == 8
+#if defined(AF_VEC_EXT)
 #if defined(__has_builtin)
 #if __has_builtin(__builtin_shufflevector)
 #define AF_SHUF(a, b, ...) __builtin_shufflevector(a, b, __VA_ARGS__)
@@ -254,7 +276,9 @@ static void rfft_power(const af_rfft *p, float *re, float *im, float *scr_re, fl
 #ifndef AF_SHUF
 #define AF_SHUF(a, b, ...) __builtin_shuffle(a, b, (vni){__VA_ARGS__})
 #endif
+#endif
 
+#if defined(AF_VEC_EXT) && W == 8 && VL == 8
 /* r[l][j] -> c[j][l] (unpack / shuffle / 128-bit permute pattern) */
 VINLINE void transpose8(const vn r[8], vn c[8]) {
     const vn t0 = AF_SHUF(r[0], r[1], 0, 8, 1, 9, 4, 12, 5, 13);
@@ -306,6 +330,41 @@ static void gather_scaled(const float *const *src, int len, float scale, float *
         for (int j = 0; j < 8; j++)
             vst(out + (size_t)(k0 + j) * VL, c[j] * scale);
     }
+}
+#elif defined(AF_VEC_EXT) && defined(__aarch64__) && W == 4 && VL == 8
+/* Transpose four frames at a time using contiguous loads on NEON. The two
+ * groups fill the low/high halves of each eight-frame SoA row. */
+VINLINE void transpose4(const vn r[4], vn c[4]) {
+    const vn t0 = AF_SHUF(r[0], r[1], 0, 4, 1, 5);
+    const vn t1 = AF_SHUF(r[0], r[1], 2, 6, 3, 7);
+    const vn t2 = AF_SHUF(r[2], r[3], 0, 4, 1, 5);
+    const vn t3 = AF_SHUF(r[2], r[3], 2, 6, 3, 7);
+    c[0] = AF_SHUF(t0, t2, 0, 1, 4, 5);
+    c[1] = AF_SHUF(t0, t2, 2, 3, 6, 7);
+    c[2] = AF_SHUF(t1, t3, 0, 1, 4, 5);
+    c[3] = AF_SHUF(t1, t3, 2, 3, 6, 7);
+}
+
+static void gather_packed(const float *const *src, int len, const float *win, float *re,
+                          float *im) {
+    for (int k = 0; k < len; k += 4)
+        for (int l = 0; l < VL; l += 4) {
+            vn r[4], c[4];
+            for (int j = 0; j < 4; j++)
+                r[j] = vld(src[l + j] + k);
+            transpose4(r, c);
+            for (int j = 0; j < 4; j += 2) {
+                vst(re + (size_t)((k + j) / 2) * VL + l, c[j] * win[k + j]);
+                vst(im + (size_t)((k + j) / 2) * VL + l, c[j + 1] * win[k + j + 1]);
+            }
+        }
+}
+
+/* The compiler's scalar gather is faster for this scaled layout on M1. */
+static void gather_scaled(const float *const *src, int len, float scale, float *out) {
+    for (int k = 0; k < len; k++)
+        for (int l = 0; l < VL; l++)
+            out[(size_t)k * VL + l] = src[l][k] * scale;
 }
 #else
 static void gather_packed(const float *const *src, int len, const float *win, float *re,
