@@ -1,5 +1,86 @@
 # Benchmark
 
+## Current environment: Apple M1 (2026-10-12)
+
+Measured locally on a MacBook Air (MacBookAir10,1), Apple M1 with 4 performance
+and 4 efficiency cores, 8 GB RAM, macOS 26.5.2 arm64. The installed extension
+uses the `generic` kernel (arm64/NEON), CMake Release, Apple Clang 21.0.0.
+Python 3.12.14, asrfront 0.1.0, NumPy 2.5.3.
+
+Torch, torchaudio, librosa and kaldi-native-fbank were not installed, so this run
+measures asrfront only; no reference speed-up is claimed for this machine.
+The Intel/WSL measurements below are historical results from a different environment.
+
+### Method and reproduction
+
+```bash
+.venv/bin/python bench/current_environment.py --json docs/benchmarks/macos-arm64-2026-10-12.json
+```
+
+The runner reuses `bench/compare.py`: one warm-up, then the best wall-clock time
+of at least 20 calls (5 for batches), targeting at least 0.5 s, with a maximum
+of 1000 calls. Thus very fast cases can hit the call cap before 0.5 s.
+Each table reports the median of three independent passes and their min–max range;
+these are medians of best times, not typical per-call latency or percentiles.
+
+Input is the repository's JFK speech WAV, tiled and sliced to exactly the requested
+length, contiguous float32 mono at 16 kHz. Timings include the Python API, validation,
+conversion and output allocation, after frontend caches are warmed. Audio decoding,
+resampling, initial frontend construction and model inference are excluded.
+Whisper uses 80 mel bins; the length sweep disables 30 s padding/trimming.
+Single calls use one thread. SenseVoice uses 80 bins, LFR m=7/n=6, dither=0,
+and synthetic CMVN shift=-10/scale=0.3 (560 dimensions), except `fbank_raw`
+and batch calls, which omit CMVN in the existing comparison runner.
+Batch inputs are 32 references to the same 30 s waveform, rather than 32 separately
+allocated recordings; batch output allocation and thread scheduling are included.
+
+Raw measurements: [JSON](benchmarks/macos-arm64-2026-10-12.json).
+
+### Single input: 30 s
+
+| Function | Output shape | Median (ms) | Range (ms) |
+|---|---|---:|---:|
+| `whisper.log_mel` | `(80, 3000)` | 2.866 | 2.865–2.866 |
+| `sensevoice.fbank + CMVN` | `(500, 560)` | 3.462 | 3.460–3.463 |
+| `sensevoice.fbank_raw` | `(2998, 80)` | 3.372 | 3.372–3.375 |
+
+### Input length: single thread
+
+| Audio | Whisper median (ms) | Range (ms) | SenseVoice + CMVN median (ms) | Range (ms) |
+|---|---:|---:|---:|---:|
+| 1 s | 0.103 | 0.103–0.103 | 0.128 | 0.128–0.128 |
+| 5 s | 0.485 | 0.485–0.485 | 0.588 | 0.588–0.588 |
+| 10 s | 0.957 | 0.957–0.957 | 1.159 | 1.159–1.159 |
+| 30 s | 2.865 | 2.864–2.865 | 3.460 | 3.460–3.460 |
+| 120 s | 11.544 | 11.528–11.547 | 13.891 | 13.881–13.894 |
+
+### Batch: 32 × 30 s
+
+Times are for the entire batch (960 s of audio). Scaling is relative to the
+one-thread median for the same function. SenseVoice batches omit CMVN.
+
+| Threads | Whisper median (ms) | Range (ms) | Scaling | SenseVoice median (ms) | Range (ms) | Scaling |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 98.527 | 96.592–98.617 | 1.00x | 110.398 | 110.390–110.737 | 1.00x |
+| 2 | 49.289 | 49.049–49.366 | 2.00x | 55.932 | 55.902–56.698 | 1.97x |
+| 4 | 28.284 | 25.216–28.593 | 3.48x | 29.034 | 28.952–56.292 | 3.80x |
+| 8 | 26.008 | 25.574–26.200 | 3.79x | 34.650 | 34.021–38.466 | 3.19x |
+
+Single-input cost is approximately linear with audio length. In this run, the
+lowest batch median is at 8 threads for Whisper and 4 for SenseVoice. The
+SenseVoice 4-thread range is wide; these three best-time measurements do not
+establish a consistently optimal thread count. Core assignment, background load
+and thermal conditions were not controlled or profiled.
+
+Validation: `pytest tests/python/test_whisper.py tests/python/test_sensevoice.py -q`
+completed with **144 passed, 13 skipped**. Skipped cases are not accuracy evidence
+for the unavailable reference libraries on this machine.
+
+## Historical environment: Intel Core i5-14400F / WSL2
+
+The following results were already recorded in this document; they were not rerun
+on the current Mac. All environment-specific claims below refer to that Intel system.
+
 Speed of `asrfront` against the reference implementations of each model's frontend.
 Accuracy is covered in [whisper.md](whisper.md#accuracy) and
 [sensevoice.md](sensevoice.md#accuracy); every implementation compared here produces the
@@ -205,8 +286,8 @@ whole-spectrogram normalization pass for Whisper.
 
 - WSL2 on a desktop CPU with turbo boost; absolute numbers vary by ±5–10 % between runs and
   will differ on other machines. Ratios are more stable than absolute times.
-- Only x86-64 with AVX2 was measured. aarch64 uses the `generic` (NEON) kernels; its speed was
-  not measured.
+- This historical run measured x86-64 with AVX2 only. For current aarch64 `generic`
+  (NEON) results, see the Apple M1 section above.
 - The reference pipelines are re-implementations of the libraries' code paths (verified to
   produce the same features, see `tests/python/test_reference.py`), not the full
   `openai-whisper` / `funasr` packages, which add file decoding and model-specific glue.
