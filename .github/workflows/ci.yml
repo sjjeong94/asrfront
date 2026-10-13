@@ -24,7 +24,7 @@ jobs:
       - name: clang-format
         run: >-
           uv run --no-sync clang-format --dry-run --Werror
-          csrc/*.c csrc/*.h csrc/include/*.h tests/c/*.c bench/*.c src/asrfront/_ext.cpp
+          csrc/*.c csrc/*.h csrc/include/*.h tests/c/*.c tests/fuzz/*.c bench/*.c src/asrfront/_ext.cpp
 
   test:
     name: test (${{ matrix.os }}, py${{ matrix.python }})

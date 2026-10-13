@@ -274,7 +274,7 @@ void af_sensevoice_destroy(af_sensevoice *h);
 
 Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success criterion 2 is met against torch (≥ 5x); against librosa it is ~7.7x, short of the 10x goal.
 
-### M8. Packaging & CI (1 day) — done (CI not yet run on GitHub)
+### M8. Packaging & CI (1 day) — done
 - [x] GitHub Actions (`.github/workflows/ci.yml`, checked with actionlint):
   - `lint`: ruff check/format, `mypy --strict`, clang-format
   - `test`: Linux x86_64 / aarch64, Windows × Python 3.9 / 3.13 — `uv sync`, pytest, pytest again with `ASRFRONT_KERNELS=scalar`, C tests via CMake/CTest
@@ -292,6 +292,20 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 
 ### M9. Audio loading (~7.5 days) — done
 - WAV / raw PCM / FLAC / MP3 (M9.6: + Wave64, AIFF / AIFF-C, CAF, NIST SPHERE, IMA / MS / IMA4 ADPCM) → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
+
+### M10. Robustness — done
+- Fuzzing in the repo (`tests/fuzz/`): libFuzzer target for `af_load_memory` that also checks
+  the output contract (samples are int16 / 32768; NULL output and a known error code on
+  failure), a driver without libFuzzer (corpus replay + simple mutator), a generated seed corpus
+  with one file per container / codec. `ctest` replays the corpus (also in the ASan/UBSan CI
+  job, with a 1 GiB per-allocation cap); `.github/workflows/fuzz.yml` runs libFuzzer for 5 min
+  on C changes and 1 h weekly, keeping the grown corpus in the cache.
+- Found and fixed: FLAC sized its first buffer from the header's total frame count, so a 10 kB
+  file could request 5.4 GB up front; the hint is now capped by the input size
+  (`corpus/regress_flac_huge_total.flac`).
+- Known limit, not a bug: decoded audio can be far larger than the file (FLAC silence: ~16000x;
+  8-channel 384 kHz s32 at 23 kB decodes to ~360 MB before downmix). Callers that accept
+  untrusted uploads should bound the input size.
 
 ---
 

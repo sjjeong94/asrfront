@@ -10,12 +10,23 @@ endif()
 option(ASRFRONT_BUILD_PYTHON "Build the nanobind Python extension" ${_asrfront_python_default})
 option(ASRFRONT_BUILD_TESTS "Build C unit tests" OFF)
 option(ASRFRONT_BUILD_BENCH "Build C benchmarks" OFF)
+option(ASRFRONT_BUILD_FUZZ "Build the libFuzzer target (Clang; implies ASan + UBSan)" OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# libFuzzer build (tests/fuzz/README.md): coverage instrumentation and sanitizers everywhere.
+if(ASRFRONT_BUILD_FUZZ)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "ASRFRONT_BUILD_FUZZ needs Clang (libFuzzer)")
+  endif()
+  add_compile_options(-fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=all
+                      -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=address,undefined)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -145,6 +156,18 @@ if(ASRFRONT_BUILD_TESTS)
     target_link_libraries(${t} PRIVATE asrfront_core)
     add_test(NAME ${t} COMMAND ${t})
   endforeach()
+  # The fuzz target's checks on the seed corpus, without libFuzzer (any compiler).
+  add_executable(fuzz_replay tests/fuzz/fuzz_load.c tests/fuzz/fuzz_main.c)
+  target_link_libraries(fuzz_replay PRIVATE asrfront_core)
+  add_test(NAME fuzz_corpus COMMAND fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus)
+  # in sanitizer builds: no single allocation above 1 GiB (inputs are a few kB)
+  set_tests_properties(fuzz_corpus PROPERTIES ENVIRONMENT "ASAN_OPTIONS=max_allocation_size_mb=1024")
+endif()
+
+if(ASRFRONT_BUILD_FUZZ)
+  add_executable(fuzz_load tests/fuzz/fuzz_load.c)
+  target_link_libraries(fuzz_load PRIVATE asrfront_core)
+  target_link_options(fuzz_load PRIVATE -fsanitize=fuzzer)
 endif()
 
 # ---------------------------------------------------------------------------

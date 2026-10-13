@@ -1,0 +1,70 @@
+name: Fuzz
+
+# libFuzzer + ASan + UBSan on af_load_memory (tests/fuzz/README.md): a short run whenever the C
+# code changes, a long one every week. The corpus grown by earlier runs is kept in the cache;
+# crashing inputs are uploaded as an artifact (add them to tests/fuzz/corpus once fixed).
+on:
+  push:
+    branches: [main]
+    paths: ["csrc/**", "tests/fuzz/**", "CMakeLists.txt", ".github/workflows/fuzz.yml"]
+  pull_request:
+    paths: ["csrc/**", "tests/fuzz/**", "CMakeLists.txt", ".github/workflows/fuzz.yml"]
+  schedule:
+    - cron: "0 3 * * 1" # Mondays 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Fuzzing time in seconds
+        default: "1800"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  libfuzzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Build fuzz_load (Clang, libFuzzer, ASan, UBSan)
+        run: |
+          uv sync --no-install-project
+          uv run --no-sync cmake -S . -B build/fuzz -G Ninja -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DASRFRONT_BUILD_FUZZ=ON
+          uv run --no-sync cmake --build build/fuzz --target fuzz_load
+      - name: Restore the corpus of earlier runs
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz-corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz
+        env:
+          SECONDS_TO_RUN: >-
+            ${{ github.event_name == 'schedule' && '3600'
+            || github.event_name == 'workflow_dispatch' && inputs.seconds
+            || '300' }}
+        run: |
+          mkdir -p fuzz-corpus artifacts
+          # new inputs go to fuzz-corpus (first directory); the seeds are read only
+          ./build/fuzz/fuzz_load fuzz-corpus tests/fuzz/corpus \
+            -max_total_time="$SECONDS_TO_RUN" -timeout=10 -rss_limit_mb=2048 \
+            -malloc_limit_mb=1024 -max_len=65536 -artifact_prefix=artifacts/ \
+            -print_final_stats=1
+      - name: Save the corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz-corpus
+          key: fuzz-corpus-${{ github.run_id }}
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: artifacts
