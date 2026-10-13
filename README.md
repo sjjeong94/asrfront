@@ -56,6 +56,11 @@ SenseVoiceSmall expect — the same as `whisper.load_audio(path)`, i.e.
   [`docs/load.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/load.md)
 - for SenseVoice: identical to FunASR's own loading at 16 kHz; for other rates FunASR resamples
   with torchaudio, and the features differ less than between two standard resamplers
+- untrusted input: malformed files fail with `ValueError` (the loader is fuzzed in CI), but
+  memory use grows with the *decoded* length, which a small file can make huge — a 23 kB FLAC
+  of 8-channel 384 kHz silence decodes to ~360 MB (ffmpeg behaves the same). Services that load
+  user uploads should limit the upload size accordingly, or check the duration first
+  ([`docs/load.md`, "Resource use"](https://github.com/sjjeong94/asrfront/blob/main/docs/load.md#resource-use))
 
 ### Whisper
 

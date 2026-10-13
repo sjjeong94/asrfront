@@ -359,6 +359,25 @@ a `.pcm` / `.raw` file extension, or for bytes input without a recognized header
 `plan.md` §7.3 for the detection rules; MP3 sync detection requires two consecutive valid
 Layer III frame headers so that raw PCM is never taken for MP3).
 
+## Resource use
+
+`load` decodes the whole file before downmixing and resampling, so its peak memory is about
+the decoded size (all channels, at the input rate, 2–8 bytes per sample) plus the 16 kHz mono
+float32 output. That is proportional to the audio's duration, not to the file size:
+
+| Input | Peak memory per byte of file (measured worst cases) |
+|---|---|
+| PCM / float / G.711 | ≤ ~70x (8-bit at 1 kHz upsampled to 16 kHz: 64 bytes of output per input byte) |
+| IMA / MS / IMA4 ADPCM | ≤ ~130x (4 bits per sample, same worst case) |
+| MP3 | ≤ ~100x (8 kbps at 8 kHz) |
+| FLAC | unbounded in practice: silence or constant signals compress to almost nothing — 23 kB of 8-channel 384 kHz s32 silence (30 s) peaks at ~360 MB, ~16000x |
+
+Header fields never size an allocation beyond what the file can hold (the FLAC total frame
+count is only a hint, capped by the input size; tested by `tests/fuzz`), so the limit above is
+the only amplification. ffmpeg has the same property. Callers that load untrusted uploads
+should bound what they accept, e.g. the upload size (with FLAC in mind), or the duration read
+from the header before calling `load`. There is deliberately no limit option in `load` itself.
+
 ## SenseVoice (FunASR) loading
 
 FunASR does not use ffmpeg for local files: `load_audio_text_image_video` reads with

@@ -304,8 +304,9 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
   file could request 5.4 GB up front; the hint is now capped by the input size
   (`corpus/regress_flac_huge_total.flac`).
 - Known limit, not a bug: decoded audio can be far larger than the file (FLAC silence: ~16000x;
-  8-channel 384 kHz s32 at 23 kB decodes to ~360 MB before downmix). Callers that accept
-  untrusted uploads should bound the input size.
+  8-channel 384 kHz s32 at 23 kB decodes to ~360 MB before downmix). Decided: no limit option
+  in `load` (it stays single-argument); documented in README and `docs/load.md` ("Resource
+  use") — callers that accept untrusted uploads bound the upload size or duration themselves.
 
 ---
 
