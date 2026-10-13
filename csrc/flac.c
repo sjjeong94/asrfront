@@ -62,10 +62,11 @@ int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out) {
         return ch > 8 ? AF_EUNSUPPORTED : AF_ECORRUPT;
     }
     /* Decode as left-justified s32, growing the buffer: the header's total may be 0 (unknown)
-     * or larger than what a truncated file holds. */
-    size_t cap = f->totalPCMFrameCount > 0 && f->totalPCMFrameCount < ((size_t)1 << 28)
-                     ? (size_t)f->totalPCMFrameCount
-                     : 65536;
+     * or larger than what a truncated file holds. It is a hint only, never trusted beyond the
+     * input size: a 10 kB file claiming 2^28 frames must not allocate gigabytes up front. */
+    size_t cap = 65536 + size; /* frames; enough for any common compression ratio */
+    if (f->totalPCMFrameCount > 0 && f->totalPCMFrameCount < cap)
+        cap = (size_t)f->totalPCMFrameCount;
     size_t n = 0;
     int32_t *pcm = malloc(cap * (size_t)ch * sizeof(int32_t));
     while (pcm) {
