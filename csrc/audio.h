@@ -49,15 +49,57 @@ typedef struct af_decoded {
 } af_decoded;
 
 void af_decoded_free(af_decoded *d);
+/* Allocate d->data for d->n_frames * d->channels samples of `fmt` and set d->fmt. */
+int af_decoded_alloc(af_decoded *d, af_sample_fmt fmt);
+
+/* Coded sample formats of the uncompressed codecs (pcm.c). */
+typedef enum {
+    AF_PCM_U8,
+    AF_PCM_S8,
+    AF_PCM_S16LE,
+    AF_PCM_S16BE,
+    AF_PCM_S24LE,
+    AF_PCM_S24BE,
+    AF_PCM_S32LE,
+    AF_PCM_S32BE,
+    AF_PCM_F32LE,
+    AF_PCM_F32BE,
+    AF_PCM_F64LE,
+    AF_PCM_F64BE,
+    AF_PCM_ALAW,
+    AF_PCM_MULAW,
+} af_pcm_codec;
+
+int af_pcm_bytes(af_pcm_codec c); /* bytes per sample */
+/* Convert d->n_frames * d->channels coded samples at src into d->data (sets d->fmt). */
+int af_pcm_convert(af_decoded *d, af_pcm_codec c, const uint8_t *src);
+/* As af_pcm_convert for all whole frames in `size` bytes (sets d->n_frames). On error
+ * d->data is freed. */
+int af_pcm_decode_frames(af_decoded *d, af_pcm_codec c, const uint8_t *src, size_t size);
+
+/* ADPCM codecs (adpcm.c), decoded to s16 with ffmpeg's arithmetic. d->channels must be set;
+ * these set d->fmt, d->n_frames and d->data. A partial last block decodes the whole sample
+ * groups it contains. */
+int af_adpcm_ima_wav(af_decoded *d, const uint8_t *src, size_t size, size_t block_align);
+int af_adpcm_ms(af_decoded *d, const uint8_t *src, size_t size, size_t block_align);
+int af_adpcm_ima_qt(af_decoded *d, const uint8_t *src, size_t size); /* 34-byte packets */
 
 /* Default layout for a channel count (ffmpeg's), AF_EUNSUPPORTED above 8 channels. */
 int af_default_layout(int channels, uint32_t *layout);
 /* Layout from a channel mask (lowest set bits first); AF_EUNSUPPORTED if the mask does not
  * name exactly `channels` positions. */
 int af_mask_layout(uint32_t mask, int channels, uint32_t *layout);
+/* Layout from a CoreAudio AudioChannelLayout (CAF 'chan' / AIFF 'CHAN' chunk body). */
+int af_coreaudio_layout(const uint8_t *body, size_t size, int channels, uint32_t *layout);
+
+extern const uint8_t af_w64_riff_guid[16]; /* first 16 bytes of a Wave64 file */
 
 /* Container decoders. On success *out owns its samples. */
-int af_wav_decode(const uint8_t *buf, size_t size, af_decoded *out);
+int af_wav_decode(const uint8_t *buf, size_t size, af_decoded *out);  /* RIFF / RF64 / BW64 */
+int af_w64_decode(const uint8_t *buf, size_t size, af_decoded *out);  /* Sony Wave64 */
+int af_aiff_decode(const uint8_t *buf, size_t size, af_decoded *out); /* AIFF / AIFF-C */
+int af_caf_decode(const uint8_t *buf, size_t size, af_decoded *out);
+int af_sphere_decode(const uint8_t *buf, size_t size, af_decoded *out);  /* NIST SPHERE */
 int af_pcm_decode_raw(const uint8_t *buf, size_t size, af_decoded *out); /* s16le 16k mono */
 int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out);
 int af_mp3_decode(const uint8_t *buf, size_t size, af_decoded *out);

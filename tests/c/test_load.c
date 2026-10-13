@@ -273,6 +273,252 @@ static void test_layouts(void) {
     CHECK(af_mask_layout(AF_CH_BL | AF_CH_FC, 2, lay) == AF_OK && lay[0] == AF_CH_FC);
 }
 
+/* --- other containers -------------------------------------------------------------------- */
+
+static void put16be(buf_t *w, unsigned v) {
+    uint8_t b[2] = {(uint8_t)(v >> 8), (uint8_t)v};
+    put(w, b, 2);
+}
+static void put32be(buf_t *w, uint32_t v) {
+    uint8_t b[4] = {(uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v};
+    put(w, b, 4);
+}
+static void put64be(buf_t *w, uint64_t v) {
+    put32be(w, (uint32_t)(v >> 32));
+    put32be(w, (uint32_t)v);
+}
+
+/* every truncation of a valid file fails cleanly or decodes at most the full length */
+static void check_truncations(const buf_t *w) {
+    float *a = NULL;
+    size_t n = 0, full = 0;
+    CHECK(af_load_memory(w->b, w->n, AF_RAW_NEVER, &a, &full) == AF_OK);
+    af_audio_free(a);
+    for (size_t len = 0; len < w->n; len++) {
+        int rc = af_load_memory(w->b, len, AF_RAW_NEVER, &a, &n);
+        CHECK(rc == AF_OK || rc == AF_ECORRUPT || rc == AF_EUNSUPPORTED);
+        CHECK(rc != AF_OK || n <= full);
+        af_audio_free(a);
+    }
+}
+
+/* AIFF / AIFF-C at 16 kHz: COMM (+ AIFC compression type), then SSND with `n` body bytes */
+static void aiff_head(buf_t *w, const char *comp, unsigned ch, unsigned bits, uint32_t n) {
+    w->n = 0;
+    put(w, "FORM", 4);
+    put32be(w, 0);
+    put(w, comp ? "AIFC" : "AIFF", 4);
+    put(w, "COMM", 4);
+    put32be(w, comp ? 24 : 18);
+    put16be(w, ch);
+    put32be(w, 0); /* frame count: not used */
+    put16be(w, bits);
+    put(w, "\x40\x0C\xFA\x00\x00\x00\x00\x00\x00\x00", 10); /* 16000.0 */
+    if (comp) {
+        put(w, comp, 4);
+        put16be(w, 0); /* empty name */
+    }
+    put(w, "SSND", 4);
+    put32be(w, 8 + n);
+    put32be(w, 0); /* offset */
+    put32be(w, 0); /* block size */
+}
+
+static void test_aiff(void) {
+    buf_t w;
+    float *a = NULL;
+    size_t n = 0;
+    aiff_head(&w, NULL, 1, 16, 4);
+    put16be(&w, 0x4000);
+    put16be(&w, 0x8000);
+    CHECK(load(&w, AF_RAW_AUTO, &a, &n) == AF_OK && n == 2);
+    if (a && n == 2)
+        CHECK(a[0] == 0.5f && a[1] == -1.0f);
+    af_audio_free(a);
+    check_truncations(&w);
+
+    aiff_head(&w, "sowt", 1, 16, 2); /* little-endian */
+    put16(&w, 0x4000);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_OK && n == 1 && a[0] == 0.5f);
+    af_audio_free(a);
+
+    aiff_head(&w, NULL, 1, 8, 2); /* 8-bit AIFF is signed */
+    put(&w, "\x40\xC0", 2);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_OK && n == 2);
+    if (a && n == 2)
+        CHECK(a[0] == 0.5f && a[1] == -0.5f);
+    af_audio_free(a);
+
+    /* QuickTime IMA: header predictor 0x1000 (step index 0), nibble 4 adds step 7 + 7/8 */
+    aiff_head(&w, "ima4", 1, 16, 34);
+    put16be(&w, 0x1000);
+    put(&w, "\x04", 1);
+    for (int i = 0; i < 31; i++)
+        put(&w, "\x00", 1);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_OK && n == 64);
+    if (a && n == 64)
+        CHECK(a[0] == (4096.0f + 7.0f) / 32768.0f);
+    af_audio_free(a);
+    check_truncations(&w);
+
+    aiff_head(&w, "QDM2", 1, 16, 2);
+    put16be(&w, 0);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_EUNSUPPORTED);
+
+    aiff_head(&w, NULL, 1, 16, 2);
+    w.n -= 12;
+    put(&w, "SSND\0\0\0\0", 8); /* SSND size 0 */
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_ECORRUPT);
+}
+
+static void caf_head(buf_t *w, const char *format, uint32_t flags, unsigned ch, unsigned bits,
+                     int64_t data_size) {
+    w->n = 0;
+    put(w, "caff\0\1\0\0desc", 12);
+    put64be(w, 32);
+    put(w, "\x40\xCF\x40\x00\x00\x00\x00\x00", 8); /* 16000.0 */
+    put(w, format, 4);
+    put32be(w, flags);
+    put32be(w, ch * ((bits + 7) / 8)); /* bytes per packet */
+    put32be(w, 1);                     /* frames per packet */
+    put32be(w, ch);
+    put32be(w, bits);
+    put(w, "data", 4);
+    put64be(w, (uint64_t)data_size);
+    put32be(w, 0); /* edit count */
+}
+
+static void test_caf(void) {
+    buf_t w;
+    float *a = NULL;
+    size_t n = 0;
+    caf_head(&w, "lpcm", 2, 2, 16, 4 + 8); /* little-endian stereo s16 */
+    put16(&w, 0x4000), put16(&w, 0x4000);
+    put16(&w, 0xC000), put16(&w, 0xC000);
+    CHECK(load(&w, AF_RAW_AUTO, &a, &n) == AF_OK && n == 2);
+    if (a && n == 2)
+        CHECK(a[0] == 0.5f && a[1] == -0.5f);
+    af_audio_free(a);
+    check_truncations(&w);
+
+    caf_head(&w, "lpcm", 1, 1, 32, -1); /* big-endian float, streamed (size -1) */
+    put32be(&w, 0x3F000000);            /* 0.5f */
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_OK && n == 1 && a[0] == 0.5f);
+    af_audio_free(a);
+
+    caf_head(&w, "aac ", 0, 1, 16, -1);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_EUNSUPPORTED);
+    memcpy(w.b + 20 + 8, "lpcm", 4); /* desc body at 20: rate, format, flags, ... */
+    memset(w.b + 20 + 16, 0, 4);     /* bytes per packet 0 */
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_ECORRUPT);
+}
+
+static void test_sphere(void) {
+    buf_t w;
+    float *a = NULL;
+    size_t n = 0;
+    static const char head[] = "NIST_1A\n   1024\nchannel_count -i 1\nsample_rate -i 16000\n"
+                               "sample_n_bytes -i 2\nsample_byte_format -s2 10\n"
+                               "sample_coding -s3 pcm\nend_head\n";
+    w.n = 0;
+    put(&w, head, sizeof head - 1);
+    while (w.n < 1024)
+        put(&w, " ", 1);
+    put16be(&w, 0x4000);
+    put16be(&w, 0xC000);
+    CHECK(load(&w, AF_RAW_AUTO, &a, &n) == AF_OK && n == 2);
+    if (a && n == 2)
+        CHECK(a[0] == 0.5f && a[1] == -0.5f);
+    af_audio_free(a);
+    check_truncations(&w);
+
+    memcpy(strstr((char *)w.b, "-s3 pcm"), "-s3 xyz", 7);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_EUNSUPPORTED);
+}
+
+static void test_w64(void) {
+    static const uint8_t tail[12] = {0xF3, 0xAC, 0xD3, 0x11, 0x8C, 0xD1,
+                                     0x00, 0xC0, 0x4F, 0x8E, 0xDB, 0x8A};
+    buf_t w, h;
+    float *a = NULL;
+    size_t n = 0;
+    w.n = 0;
+    put(&w, af_w64_riff_guid, 16);
+    put32(&w, 0), put32(&w, 0);
+    put(&w, "wave", 4), put(&w, tail, 12);
+    put(&w, "fmt ", 4), put(&w, tail, 12);
+    put32(&w, 24 + 16), put32(&w, 0);
+    wav_head(&h, 1, 1, 16000, 16, 0);
+    put(&w, h.b + 20, 16); /* the WAVEFORMAT fields */
+    put(&w, "data", 4), put(&w, tail, 12);
+    put32(&w, 24 + 4), put32(&w, 0);
+    put16(&w, 0x4000);
+    put16(&w, 0xC000);
+    CHECK(load(&w, AF_RAW_AUTO, &a, &n) == AF_OK && n == 2);
+    if (a && n == 2)
+        CHECK(a[0] == 0.5f && a[1] == -0.5f);
+    af_audio_free(a);
+    check_truncations(&w);
+}
+
+static void test_adpcm(void) {
+    buf_t w;
+    float *a = NULL;
+    size_t n = 0;
+    /* IMA ADPCM WAV, one 8-byte block: header (predictor 100, step index 0) + 8 nibbles.
+     * Nibble 7: ((2 * 7 + 1) * 7) >> 3 = 13 */
+    wav_head(&w, 0x11, 1, 16000, 4, 0);
+    w.b[32] = 8; /* block align */
+    w.b[33] = 0;
+    put(&w, "data", 4);
+    put32(&w, 8);
+    put16(&w, 100);
+    put(&w, "\0\0\x07\0\0\0", 6);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_OK && n == 9);
+    if (a && n == 9)
+        CHECK(a[0] == 100.0f / 32768.0f && a[1] == 113.0f / 32768.0f);
+    af_audio_free(a);
+    check_truncations(&w);
+    w.b[w.n - 6] = 89; /* step index out of range */
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_ECORRUPT);
+
+    /* MS ADPCM, one 9-byte block: predictor 3 (192, 64), delta 16, sample1 1000, sample2 -1;
+     * (1000 * 192 - 1 * 64) / 256 = 749.75 rounds toward zero, + 1 * 16 */
+    wav_head(&w, 0x02, 1, 16000, 4, 0);
+    w.b[32] = 9;
+    w.b[33] = 0;
+    put(&w, "data", 4);
+    put32(&w, 9);
+    put(&w, "\x03", 1);
+    put16(&w, 16);
+    put16(&w, 1000);
+    put16(&w, 0xFFFF);
+    put(&w, "\x10", 1);
+    CHECK(load(&w, AF_RAW_NEVER, &a, &n) == AF_OK && n == 4);
+    if (a && n == 4)
+        CHECK(a[0] == -1.0f / 32768.0f && a[1] == 1000.0f / 32768.0f && a[2] == 765.0f / 32768.0f);
+    af_audio_free(a);
+    check_truncations(&w);
+}
+
+static void test_coreaudio_layouts(void) {
+    uint8_t chan[12 + 3 * 20] = {0};
+    uint32_t lay[AF_MAX_CHANNELS];
+    chan[1] = 108, chan[3] = 4; /* kAudioChannelLayoutTag_Quadraphonic */
+    CHECK(af_coreaudio_layout(chan, 12, 4, lay) == AF_OK && lay[2] == AF_CH_SL);
+    CHECK(af_coreaudio_layout(chan, 12, 3, lay) == AF_OK && lay[2] == AF_CH_LFE); /* count */
+    CHECK(af_coreaudio_layout(chan, 11, 4, lay) == AF_ECORRUPT);
+    memset(chan, 0, sizeof chan);
+    chan[1] = 1, chan[7] = 0x07; /* channel bitmap FL FR FC */
+    CHECK(af_coreaudio_layout(chan, 12, 3, lay) == AF_OK && lay[2] == AF_CH_FC);
+    memset(chan, 0, sizeof chan);
+    chan[11] = 3; /* descriptions: C, L, (label 38: Lt -> no position) */
+    chan[12 + 3] = 3, chan[32 + 3] = 1, chan[52 + 3] = 38;
+    CHECK(af_coreaudio_layout(chan, sizeof chan, 3, lay) == AF_OK && lay[0] == AF_CH_FC &&
+          lay[1] == AF_CH_FL && lay[2] == 0);
+    CHECK(af_coreaudio_layout(chan, sizeof chan - 1, 3, lay) == AF_OK && lay[2] == AF_CH_LFE);
+}
+
 static void test_file(void) {
     float *a = NULL;
     size_t n = 0;
@@ -286,6 +532,12 @@ int main(void) {
     test_wav_errors();
     test_raw_and_detection();
     test_layouts();
+    test_aiff();
+    test_caf();
+    test_sphere();
+    test_w64();
+    test_adpcm();
+    test_coreaudio_layouts();
     test_file();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);

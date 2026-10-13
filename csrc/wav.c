@@ -1,4 +1,4 @@
-/* WAV (RIFF / RF64 / BW64) and raw PCM decoding. */
+/* WAV (RIFF / RF64 / BW64) and Sony Wave64 decoding. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,9 +7,11 @@
 
 enum {
     WAV_TAG_PCM = 0x0001,
+    WAV_TAG_MS_ADPCM = 0x0002,
     WAV_TAG_FLOAT = 0x0003,
     WAV_TAG_ALAW = 0x0006,
     WAV_TAG_MULAW = 0x0007,
+    WAV_TAG_IMA_ADPCM = 0x0011,
     WAV_TAG_EXTENSIBLE = 0xFFFE,
 };
 
@@ -25,109 +27,80 @@ static uint64_t rd64(const uint8_t *p) {
     return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4) << 32);
 }
 
-/* G.711 expansion to 16-bit linear (ITU-T G.711 segment/quantization tables). */
-static int16_t alaw_to_s16(uint8_t a) {
-    a ^= 0x55;
-    int seg = (a >> 4) & 7;
-    int t = (a & 0x0F) << 4;
-    if (seg == 0)
-        t += 8;
-    else
-        t = (t + 0x108) << (seg - 1);
-    return (int16_t)((a & 0x80) ? t : -t);
-}
+/* The parts of a WAVEFORMATEX / WAVEFORMATEXTENSIBLE ("fmt " chunk) that decoding needs. */
+typedef struct {
+    int tag, channels, bits;
+    uint32_t sample_rate, mask, block_align;
+} wav_fmt;
 
-static int16_t mulaw_to_s16(uint8_t u) {
-    u = (uint8_t)~u;
-    int t = (((u & 0x0F) << 3) + 0x84) << ((u >> 4) & 7);
-    return (int16_t)((u & 0x80) ? (0x84 - t) : (t - 0x84));
-}
-
-void af_decoded_free(af_decoded *d) {
-    if (d) {
-        free(d->data);
-        d->data = NULL;
-    }
-}
-
-static int alloc_samples(af_decoded *d, size_t elem_size) {
-    size_t n = d->n_frames * (size_t)d->channels;
-    if (d->channels > 0 && n / (size_t)d->channels != d->n_frames)
+static int parse_fmt(const uint8_t *body, uint64_t size, wav_fmt *f) {
+    if (size < 16)
         return AF_ECORRUPT;
-    if (n > SIZE_MAX / elem_size)
-        return AF_ENOMEM;
-    d->data = malloc(n * elem_size > 0 ? n * elem_size : 1);
-    return d->data ? AF_OK : AF_ENOMEM;
-}
-
-/* Convert `n` little-endian coded samples into d->data. */
-static int convert(af_decoded *d, int tag, int bytes, const uint8_t *src) {
-    size_t n = d->n_frames * (size_t)d->channels;
-    int rc;
-    switch (tag) {
-    case WAV_TAG_PCM:
-        if (bytes == 1) {
-            d->fmt = AF_SFMT_U8;
-            if ((rc = alloc_samples(d, 1)) != AF_OK)
-                return rc;
-            memcpy(d->data, src, n);
-        } else if (bytes == 2) {
-            d->fmt = AF_SFMT_S16;
-            if ((rc = alloc_samples(d, 2)) != AF_OK)
-                return rc;
-            int16_t *o = d->data;
-            for (size_t i = 0; i < n; i++)
-                o[i] = (int16_t)rd16(src + 2 * i);
-        } else { /* 3 or 4 bytes: the sample goes to the top bits of an s32 */
-            d->fmt = AF_SFMT_S32;
-            if ((rc = alloc_samples(d, 4)) != AF_OK)
-                return rc;
-            int32_t *o = d->data;
-            if (bytes == 3) {
-                for (size_t i = 0; i < n; i++) {
-                    const uint8_t *p = src + 3 * i;
-                    o[i] = (int32_t)(((uint32_t)p[0] << 8) | ((uint32_t)p[1] << 16) |
-                                     ((uint32_t)p[2] << 24));
-                }
-            } else {
-                for (size_t i = 0; i < n; i++)
-                    o[i] = (int32_t)rd32(src + 4 * i);
-            }
-        }
-        return AF_OK;
-    case WAV_TAG_FLOAT:
-        if (bytes == 4) {
-            d->fmt = AF_SFMT_F32;
-            if ((rc = alloc_samples(d, 4)) != AF_OK)
-                return rc;
-            float *o = d->data;
-            for (size_t i = 0; i < n; i++) {
-                uint32_t u = rd32(src + 4 * i);
-                memcpy(&o[i], &u, 4);
-            }
-        } else {
-            d->fmt = AF_SFMT_F64;
-            if ((rc = alloc_samples(d, 8)) != AF_OK)
-                return rc;
-            double *o = d->data;
-            for (size_t i = 0; i < n; i++) {
-                uint64_t u = rd64(src + 8 * i);
-                memcpy(&o[i], &u, 8);
-            }
-        }
-        return AF_OK;
-    case WAV_TAG_ALAW:
-    case WAV_TAG_MULAW: {
-        d->fmt = AF_SFMT_S16;
-        if ((rc = alloc_samples(d, 2)) != AF_OK)
-            return rc;
-        int16_t *o = d->data;
-        for (size_t i = 0; i < n; i++)
-            o[i] = tag == WAV_TAG_ALAW ? alaw_to_s16(src[i]) : mulaw_to_s16(src[i]);
-        return AF_OK;
+    f->tag = rd16(body);
+    f->channels = rd16(body + 2);
+    f->sample_rate = rd32(body + 4);
+    f->block_align = rd16(body + 12);
+    f->bits = rd16(body + 14);
+    f->mask = 0;
+    if (f->tag == WAV_TAG_EXTENSIBLE) {
+        if (size < 40 || rd16(body + 16) < 22)
+            return AF_ECORRUPT;
+        f->mask = rd32(body + 20);
+        f->tag = rd16(body + 24); /* first two bytes of the sub-format GUID */
     }
+    if (f->channels <= 0 || f->sample_rate == 0 || f->sample_rate > 0x7FFFFFFF)
+        return AF_ECORRUPT;
+    if (f->channels > AF_MAX_CHANNELS)
+        return AF_EUNSUPPORTED;
+    const uint32_t ch = (uint32_t)f->channels;
+    switch (f->tag) {
+    case WAV_TAG_PCM:
+        return f->bits == 8 || f->bits == 16 || f->bits == 24 || f->bits == 32 ? AF_OK
+                                                                               : AF_EUNSUPPORTED;
+    case WAV_TAG_FLOAT:
+        return f->bits == 32 || f->bits == 64 ? AF_OK : AF_EUNSUPPORTED;
+    case WAV_TAG_ALAW:
+    case WAV_TAG_MULAW:
+        return f->bits == 8 ? AF_OK : AF_EUNSUPPORTED;
+    case WAV_TAG_IMA_ADPCM: /* per channel: a 4-byte header, then groups of 4 bytes */
+        if (f->bits != 4)
+            return AF_EUNSUPPORTED; /* 2/3/5-bit IMA variants */
+        return f->block_align >= 4 * ch && (f->block_align - 4 * ch) % (4 * ch) == 0 ? AF_OK
+                                                                                     : AF_ECORRUPT;
+    case WAV_TAG_MS_ADPCM: /* ffmpeg decodes it for one or two channels only */
+        if (ch > 2)
+            return AF_EUNSUPPORTED;
+        return f->block_align >= 7 * ch ? AF_OK : AF_ECORRUPT;
     default:
         return AF_EUNSUPPORTED;
+    }
+}
+
+/* Decode `size` bytes of sample data (whole frames / blocks, partial ones as available). */
+static int decode_data(const wav_fmt *f, const uint8_t *data, size_t size, af_decoded *out) {
+    out->channels = f->channels;
+    out->sample_rate = (int)f->sample_rate;
+    int rc = f->mask ? af_mask_layout(f->mask, f->channels, out->layout)
+                     : af_default_layout(f->channels, out->layout);
+    if (rc == AF_EUNSUPPORTED && f->mask)
+        rc = af_default_layout(f->channels, out->layout);
+    if (rc != AF_OK)
+        return rc;
+    switch (f->tag) {
+    case WAV_TAG_IMA_ADPCM:
+        return af_adpcm_ima_wav(out, data, size, f->block_align);
+    case WAV_TAG_MS_ADPCM:
+        return af_adpcm_ms(out, data, size, f->block_align);
+    case WAV_TAG_FLOAT:
+        return af_pcm_decode_frames(out, f->bits == 32 ? AF_PCM_F32LE : AF_PCM_F64LE, data, size);
+    case WAV_TAG_ALAW:
+        return af_pcm_decode_frames(out, AF_PCM_ALAW, data, size);
+    case WAV_TAG_MULAW:
+        return af_pcm_decode_frames(out, AF_PCM_MULAW, data, size);
+    default: {
+        static const af_pcm_codec pcm[4] = {AF_PCM_U8, AF_PCM_S16LE, AF_PCM_S24LE, AF_PCM_S32LE};
+        return af_pcm_decode_frames(out, pcm[f->bits / 8 - 1], data, size);
+    }
     }
 }
 
@@ -139,8 +112,8 @@ int af_wav_decode(const uint8_t *buf, size_t size, af_decoded *out) {
     if (!rf64 && memcmp(buf, "RIFF", 4) != 0)
         return AF_ECORRUPT;
 
-    int have_fmt = 0, tag = 0, channels = 0, bits = 0;
-    uint32_t sample_rate = 0, mask = 0;
+    wav_fmt fmt;
+    int have_fmt = 0;
     uint64_t ds64_data_size = 0;
     int have_ds64 = 0;
     size_t pos = 12;
@@ -161,48 +134,15 @@ int af_wav_decode(const uint8_t *buf, size_t size, af_decoded *out) {
             /* streamed / unfinished / truncated files: read to the end of the buffer */
             if (data_size == 0 || data_size == 0xFFFFFFFFu || data_size > avail)
                 data_size = avail;
-            int bytes = (bits + 7) / 8;
-            size_t frame = (size_t)bytes * (size_t)channels;
-            out->channels = channels;
-            out->sample_rate = (int)sample_rate;
-            out->n_frames = (size_t)data_size / frame;
-            int rc = mask ? af_mask_layout(mask, channels, out->layout)
-                          : af_default_layout(channels, out->layout);
-            if (rc == AF_EUNSUPPORTED && mask)
-                rc = af_default_layout(channels, out->layout);
-            if (rc != AF_OK)
-                return rc;
-            rc = convert(out, tag, bytes, body);
-            if (rc != AF_OK)
-                af_decoded_free(out);
-            return rc;
+            return decode_data(&fmt, body, (size_t)data_size, out);
         }
 
         if (ck_size > avail)
             return AF_ECORRUPT;
         if (memcmp(ck, "fmt ", 4) == 0) {
-            if (ck_size < 16)
-                return AF_ECORRUPT;
-            tag = rd16(body);
-            channels = rd16(body + 2);
-            sample_rate = rd32(body + 4);
-            bits = rd16(body + 14);
-            if (tag == WAV_TAG_EXTENSIBLE) {
-                if (ck_size < 40 || rd16(body + 16) < 22)
-                    return AF_ECORRUPT;
-                mask = rd32(body + 20);
-                tag = rd16(body + 24); /* first two bytes of the sub-format GUID */
-            }
-            if (channels <= 0 || sample_rate == 0 || sample_rate > 0x7FFFFFFF)
-                return AF_ECORRUPT;
-            if (channels > AF_MAX_CHANNELS)
-                return AF_EUNSUPPORTED;
-            int ok =
-                (tag == WAV_TAG_PCM && (bits == 8 || bits == 16 || bits == 24 || bits == 32)) ||
-                (tag == WAV_TAG_FLOAT && (bits == 32 || bits == 64)) ||
-                ((tag == WAV_TAG_ALAW || tag == WAV_TAG_MULAW) && bits == 8);
-            if (!ok)
-                return AF_EUNSUPPORTED;
+            int rc = parse_fmt(body, ck_size, &fmt);
+            if (rc != AF_OK)
+                return rc;
             have_fmt = 1;
         } else if (memcmp(ck, "ds64", 4) == 0 && rf64) {
             if (ck_size < 16)
@@ -216,11 +156,51 @@ int af_wav_decode(const uint8_t *buf, size_t size, af_decoded *out) {
     }
 }
 
-int af_pcm_decode_raw(const uint8_t *buf, size_t size, af_decoded *out) {
+/* Wave64: RIFF with GUID chunk ids and 64-bit sizes that include the 24-byte chunk header;
+ * chunks are 8-byte aligned. */
+static const uint8_t W64_GUID_TAIL[12] = {0xF3, 0xAC, 0xD3, 0x11, 0x8C, 0xD1,
+                                          0x00, 0xC0, 0x4F, 0x8E, 0xDB, 0x8A};
+const uint8_t af_w64_riff_guid[16] = {'r',  'i',  'f',  'f',  0x2E, 0x91, 0xCF, 0x11,
+                                      0xA5, 0xD6, 0x28, 0xDB, 0x04, 0xC1, 0x00, 0x00};
+
+static int w64_id(const uint8_t *guid, const char *fourcc) {
+    return memcmp(guid, fourcc, 4) == 0 && memcmp(guid + 4, W64_GUID_TAIL, 12) == 0;
+}
+
+int af_w64_decode(const uint8_t *buf, size_t size, af_decoded *out) {
     memset(out, 0, sizeof(*out));
-    out->channels = 1;
-    out->sample_rate = AF_SAMPLE_RATE;
-    out->layout[0] = AF_CH_FC;
-    out->n_frames = size / 2; /* a trailing odd byte is dropped */
-    return convert(out, WAV_TAG_PCM, 2, buf);
+    if (size < 40 || memcmp(buf, af_w64_riff_guid, 16) != 0 || !w64_id(buf + 24, "wave"))
+        return AF_ECORRUPT;
+    wav_fmt fmt;
+    int have_fmt = 0;
+    size_t pos = 40;
+    for (;;) {
+        if (size - pos < 24)
+            return AF_ECORRUPT; /* no data chunk */
+        const uint8_t *ck = buf + pos;
+        uint64_t ck_size = rd64(ck + 16); /* including the header */
+        const uint8_t *body = ck + 24;
+        size_t avail = size - pos - 24;
+        if (ck_size <= 24 || ck_size > INT64_MAX)
+            return AF_ECORRUPT;
+        uint64_t body_size = ck_size - 24;
+
+        if (w64_id(ck, "data")) {
+            if (!have_fmt)
+                return AF_ECORRUPT;
+            return decode_data(&fmt, body, body_size > avail ? avail : (size_t)body_size, out);
+        }
+        if (body_size > avail)
+            return AF_ECORRUPT;
+        if (w64_id(ck, "fmt ")) {
+            int rc = parse_fmt(body, body_size, &fmt);
+            if (rc != AF_OK)
+                return rc;
+            have_fmt = 1;
+        }
+        uint64_t next = ((uint64_t)pos + ck_size + 7) & ~(uint64_t)7;
+        if (next > size)
+            return AF_ECORRUPT;
+        pos = (size_t)next;
+    }
 }

@@ -88,15 +88,20 @@ endif()
 list(APPEND ASRFRONT_KERNEL_OBJECTS $<TARGET_OBJECTS:asrfront_drlibs>)
 
 add_library(asrfront_core STATIC
+  csrc/adpcm.c
+  csrc/aiff.c
   csrc/audio_load.c
+  csrc/caf.c
   csrc/common.c
   csrc/fft.c
   csrc/flac.c
   csrc/kernels.c
   csrc/melbank.c
   csrc/mp3.c
+  csrc/pcm.c
   csrc/remix.c
   csrc/resample.c
+  csrc/sphere.c
   csrc/wav.c
   csrc/whisper.c
   csrc/sensevoice.c

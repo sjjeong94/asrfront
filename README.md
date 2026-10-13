@@ -4,8 +4,8 @@ Super-fast frontend (feature extraction) for ASR models such as **Whisper** and
 **SenseVoiceSmall**.
 
 - native C core with no dependencies (own FFT, SIMD kernels with runtime CPU dispatch)
-- audio loading: WAV / FLAC / MP3 / raw PCM → 16 kHz mono, matching whisper's ffmpeg-based
-  `load_audio` without spawning ffmpeg
+- audio loading: WAV / AIFF / CAF / FLAC / MP3 / raw PCM (and more) → 16 kHz mono, matching
+  whisper's ffmpeg-based `load_audio` without spawning ffmpeg
 - Python binding based on [nanobind](https://github.com/wjakob/nanobind), zero-copy NumPy output
 - numerically matches the reference implementations (see [Accuracy](#accuracy))
 
@@ -43,10 +43,16 @@ Returns a 1-D float32 array at 16 kHz mono (`asrfront.SAMPLE_RATE`), the input b
 SenseVoiceSmall expect — the same as `whisper.load_audio(path)`, i.e.
 `ffmpeg -i FILE -f s16le -ac 1 -ar 16000` / 32768, but decoded in-process:
 
-- formats (detected from the content): WAV (PCM 8–32 bit, float, A-law/µ-law, RF64), FLAC, MP3
+- formats (detected from the content):
+  - WAV / RF64 / BW64 and Wave64: PCM 8–32 bit, float, A-law/µ-law, IMA and Microsoft ADPCM
+  - AIFF / AIFF-C and CAF (Apple): PCM 8–32 bit (either byte order), float, A-law/µ-law, IMA4
+  - NIST SPHERE (TIMIT-style corpora): 8/16-bit PCM, A-law/µ-law (not shorten-compressed)
+  - FLAC, MP3
+- not supported (→ `ValueError`; convert with ffmpeg first): AAC/M4A, Opus, Vorbis, WMA, video
+  containers, big-endian RIFX WAV
 - input rates 1 kHz – 384 kHz, any channel layout up to 8 channels (18 with a WAV channel mask)
-- WAV / FLAC / PCM: bit-identical to ffmpeg 7.0.2 at all common rates; MP3 (different decoder):
-  within 1/32768, same length. Details and the few documented deviations:
+- all formats but MP3: bit-identical to ffmpeg 7.0.2 at all common rates; MP3 (different
+  decoder): within 1/32768, same length. Details and the few documented deviations:
   [`docs/load.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/load.md)
 - for SenseVoice: identical to FunASR's own loading at 16 kHz; for other rates FunASR resamples
   with torchaudio, and the features differ less than between two standard resamplers

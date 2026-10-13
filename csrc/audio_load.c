@@ -10,7 +10,16 @@
 #include "asrfront.h"
 #include "audio.h"
 
-typedef enum { FMT_UNKNOWN, FMT_WAV, FMT_FLAC, FMT_MP3 } container;
+typedef enum {
+    FMT_UNKNOWN,
+    FMT_WAV,
+    FMT_W64,
+    FMT_AIFF,
+    FMT_CAF,
+    FMT_SPHERE,
+    FMT_FLAC,
+    FMT_MP3,
+} container;
 
 /* Size of an ID3v2 tag at buf (0 if none). */
 static size_t id3v2_size(const uint8_t *buf, size_t size) {
@@ -48,6 +57,15 @@ static container detect(const uint8_t *buf, size_t size) {
     if (size >= 12 && memcmp(buf + 8, "WAVE", 4) == 0 &&
         (memcmp(buf, "RIFF", 4) == 0 || memcmp(buf, "RF64", 4) == 0 || memcmp(buf, "BW64", 4) == 0))
         return FMT_WAV;
+    if (size >= 16 && memcmp(buf, af_w64_riff_guid, 16) == 0)
+        return FMT_W64;
+    if (size >= 12 && memcmp(buf, "FORM", 4) == 0 &&
+        (memcmp(buf + 8, "AIFF", 4) == 0 || memcmp(buf + 8, "AIFC", 4) == 0))
+        return FMT_AIFF;
+    if (size >= 4 && memcmp(buf, "caff", 4) == 0)
+        return FMT_CAF;
+    if (size >= 8 && memcmp(buf, "NIST_1A\n", 8) == 0)
+        return FMT_SPHERE;
     size_t off = id3v2_size(buf, size);
     if (off > size)
         return FMT_MP3; /* truncated ID3 tag: let the decoder complain */
@@ -84,6 +102,18 @@ int af_load_memory(const void *buf_, size_t size, af_raw_mode raw, float **out, 
     switch (fmt) {
     case FMT_WAV:
         rc = af_wav_decode(buf, size, &d);
+        break;
+    case FMT_W64:
+        rc = af_w64_decode(buf, size, &d);
+        break;
+    case FMT_AIFF:
+        rc = af_aiff_decode(buf, size, &d);
+        break;
+    case FMT_CAF:
+        rc = af_caf_decode(buf, size, &d);
+        break;
+    case FMT_SPHERE:
+        rc = af_sphere_decode(buf, size, &d);
         break;
     case FMT_FLAC:
         rc = af_flac_decode(buf, size, &d);

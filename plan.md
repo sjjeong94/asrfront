@@ -290,8 +290,8 @@ Before M7 the same inputs took 5.8 ms (whisper) and 5.2 ms (sensevoice). Success
 
 **Total estimate: ~12–13 working days** (all milestones implemented; first GitHub CI run pending)
 
-### M9. Audio loading (~6.5 days) — done
-- WAV / raw PCM / FLAC / MP3 → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
+### M9. Audio loading (~7.5 days) — done
+- WAV / raw PCM / FLAC / MP3 (M9.6: + Wave64, AIFF / AIFF-C, CAF, NIST SPHERE, IMA / MS / IMA4 ADPCM) → 16 kHz mono float32 for Whisper / SenseVoiceSmall, ffmpeg-compatible; single-argument `asrfront.load(path_or_bytes)`. Details in §7.
 
 ---
 
@@ -343,13 +343,13 @@ librosa. Options can be added later without breaking `load(source)`.
 
 | Item | Decision |
 |---|---|
-| formats | **WAV**, **raw PCM** (headerless), **FLAC**, **MP3** |
+| formats | **WAV**, **raw PCM** (headerless), **FLAC**, **MP3**; M9.6: **Wave64**, **AIFF / AIFF-C**, **CAF**, **NIST SPHERE**, IMA / Microsoft / IMA4 ADPCM |
 | reference | **ffmpeg** as invoked by openai-whisper `load_audio`: `ffmpeg -nostdin -threads 0 -i FILE -f s16le -ac 1 -acodec pcm_s16le -ar 16000 -` then `/ 32768` |
 | output (fixed) | 1-D float32, 16 kHz, mono (all channels downmixed), always rounded through int16 like `-f s16le` → exactly `int16 / 32768` |
 | input | a file path, or the file's bytes (`bytes` / `bytearray` / `memoryview`, e.g. an HTTP upload or a stream chunk) |
 | raw PCM (fixed) | **s16le, 16 kHz, mono** — the usual ASR convention. Raw PCM has no magic bytes, so: **path** → chosen by `.pcm` / `.raw` extension; **bytes** → chosen when no container magic is found (bytes have no extension) |
 | dependencies | still none at link time; FLAC/MP3 via vendored single-header decoders (public domain / MIT-0), compiled into `asrfront_core` |
-| not supported | AAC/M4A, Opus, Vorbis, video containers (→ clear `AF_EUNSUPPORTED` error suggesting ffmpeg) |
+| not supported | AAC/M4A, Opus, Vorbis, video containers, big-endian RIFX (ffmpeg decodes its samples as little-endian), GSM / G.722, shorten SPHERE (→ clear `AF_EUNSUPPORTED` error suggesting ffmpeg) |
 
 **Accuracy targets** (vs. the ffmpeg pipeline above, compared as int16 samples):
 
@@ -535,6 +535,30 @@ still give bit-identical results; the scalar fallback is slower on CPUs without 
   (decoded text) were not run: no model weights here.
 - README: `asrfront.load` usage, accuracy and performance; benchmark doc §6.
 
+#### 7.2.7 M9.6 results (more containers)
+
+- Added Wave64, AIFF / AIFF-C, CAF and NIST SPHERE containers and the IMA ADPCM (WAV), Microsoft
+  ADPCM and IMA4 (QuickTime) codecs. All behavior was established by experiment against ffmpeg
+  7.0.2 (§7.2.1, no ffmpeg source consulted) and written down in `docs/load.md` ("Containers"):
+  e.g. AIFF rates round halves up while CAF rates truncate, CAF 8-bit PCM is always signed, the
+  CAF/AIFF sample size comes from the bit depth only, MS ADPCM rounds its prediction toward zero
+  and ignores the `fmt ` coefficients, IMA WAV uses the product form of the difference and IMA4
+  the shift-and-add form with state carried across packets.
+- CoreAudio channel layouts (AIFF `CHAN`, CAF `chan`): the downmix weights of every predefined
+  tag were measured by least squares; ffmpeg fails on layouts outside its native order
+  (including MPEG_7_1_C, which it writes itself for 7.1) — asrfront falls back to the default
+  layout there (documented deviation).
+- Not added: big-endian RIFX (ffmpeg 7.0.2 decodes the samples little-endian, i.e. noise, so
+  matching it is pointless and deviating from it is untestable), GSM 6.10 (no encoder in the
+  reference build to test against), G.722 (rare).
+- Accuracy: bit-exact against ffmpeg on ~600 new tests (`tests/python/test_load_formats.py`:
+  ffmpeg-written files for every codec × 1/2/6 channels × 16/44.1 kHz, crafted header / damage /
+  ADPCM corner cases, jfk speech), except the known f64 ≥ 5-channel near-tie (≤ 1 LSB).
+  Multichannel (> 2) IMA WAV, which ffmpeg cannot decode, is checked per channel against
+  ffmpeg's mono decoding.
+- Robustness: C tests on hand-built buffers incl. every truncation; ~1.5 M mutated files
+  (all new containers and codecs) under ASan + UBSan without findings.
+
 ### 7.3 C design
 
 New files:
@@ -542,8 +566,10 @@ New files:
 ```
 csrc/
 ├── audio_load.c                   # format sniffing, dispatch, downmix → resample → s16 → float
-├── wav.c                          # RIFF/RF64 parser
-├── pcm.c                          # raw PCM conversion (shared by wav)
+├── wav.c                          # RIFF/RF64 + Wave64 parser
+├── aiff.c / caf.c / sphere.c      # M9.6: AIFF/AIFF-C, CAF (+ CoreAudio layouts), NIST SPHERE
+├── adpcm.c                        # M9.6: IMA (WAV), Microsoft and IMA4 (QuickTime) ADPCM
+├── pcm.c                          # PCM / float / G.711 conversion shared by the containers, raw PCM
 ├── remix.c                        # ffmpeg-compatible downmix matrix
 ├── resample.c / resample.h        # internal: swr-compatible polyphase resampler (s16 / float paths)
 └── third_party/
@@ -669,8 +695,9 @@ def load(source: str | os.PathLike[str] | bytes | bytearray | memoryview) -> np.
 | M9.3 ✅ | Resampler **from `docs/load.md` + DSP literature only, swr source not consulted** (§7.2.1): s16 integer path + float path, exact length/delay handling; internal only (one-shot) | 1.5 d |
 | M9.4 ✅ | FLAC (dr_flac) + MP3 (dr_mp3, gapless trim) integration, strict MP3 sniffing | 1 d |
 | M9.5 ✅ | SIMD resampler kernels, benchmark vs. `whisper.load_audio` (ffmpeg subprocess) / `librosa.load`, end-to-end SenseVoice check, ASan + fuzz, README/docs, wheel size check | 1.5 d |
+| M9.6 ✅ | More containers / codecs (§7.2.7): Wave64, AIFF / AIFF-C, CAF, NIST SPHERE, IMA / MS / IMA4 ADPCM; behavior pinned by experiment, docs, tests, fuzz | 1 d |
 
-**Total ~6.5 days.**
+**Total ~7.5 days.**
 
 ### 7.7 Risks
 

@@ -39,10 +39,10 @@ afterwards** (E).
 
 | Decoder output | Typical source | No resampling, mono | Resampling and/or downmix |
 |---|---|---|---|
-| u8 | 8-bit WAV | `(u − 128) << 8` | **int16 path** |
-| s16 | 16-bit WAV / FLAC / raw `.pcm` | identity | int16 mix if 16 kHz; **float path** if resampled |
-| s32 | 24/32-bit WAV, 24-bit FLAC | `x >> 16` (arithmetic shift, i.e. floor) | **float path** |
-| f32 | float WAV, MP3 (`fltp`) | `lrint(x · 32768)` | **float path** |
+| u8 | 8-bit PCM (WAV unsigned; AIFF / CAF / SPHERE signed, offset by 128) | `(u − 128) << 8` | **int16 path** |
+| s16 | 16-bit PCM, FLAC, raw `.pcm`, A-law / µ-law, ADPCM | identity | int16 mix if 16 kHz; **float path** if resampled |
+| s32 | 24/32-bit PCM, 24-bit FLAC | `x >> 16` (arithmetic shift, i.e. floor) | **float path** |
+| f32 | float PCM, MP3 (`fltp`) | `lrint(x · 32768)` | **float path** |
 | f64 | double WAV | `lrint(x · 32768)` | **double path** |
 
 (E for every cell; 16-bit stereo without resampling uses the integer downmix below, with
@@ -207,8 +207,9 @@ input samples give **no output at all**); asrfront applies the formula (deviatio
   field is ignored. Chunks are word aligned (odd sizes are followed by a pad byte); unknown chunks
   (`LIST`, `fact`, …) before or after `data` are skipped. `data` before `fmt ` is an error.
 - Codecs: PCM u8 / s16 / s24 / s32, IEEE float 32 / 64, A-law and µ-law (G.711, decoded to s16),
-  each also inside `WAVE_FORMAT_EXTENSIBLE` (sub-format GUID). Other codecs (e.g. MP3-in-WAV,
-  ADPCM) and other bit depths are rejected.
+  each also inside `WAVE_FORMAT_EXTENSIBLE` (sub-format GUID), and IMA / Microsoft ADPCM
+  (see [ADPCM](#adpcm-e)). Other codecs (e.g. MP3-in-WAV, GSM) and other bit depths are
+  rejected.
 - A `data` size of 0, 0xFFFFFFFF, or larger than the file means "until the end of the file"
   (streamed or truncated recordings); a partial last frame is dropped.
 - Channel layout: the extensible channel mask when it names exactly as many positions as there
@@ -235,6 +236,121 @@ resampling). Encoder delay and padding from a LAME/Xing/Info header are removed 
 samples at the start, padding − 529 at the end), as ffmpeg does; without such a header neither
 trims. The decoders differ by ≤ 5·10⁻⁶ before conversion, which gives **≤ 1 LSB** in ~1 % of the
 output samples; length and alignment are identical. Only MPEG-1/2/2.5 Layer III is detected.
+
+### Wave64 (E)
+
+Sony Wave64 is WAV with 16-byte GUID chunk ids and 64-bit little-endian chunk sizes that
+include the 24-byte chunk header; chunks are 8-byte aligned. The `fmt ` contents, codecs and
+channel layout rules are those of WAV. A `data` size of 24 or less (or negative) is an error;
+one beyond the file means "until the end of the file".
+
+### AIFF / AIFF-C (E)
+
+- `FORM` + `AIFF` / `AIFC`; big-endian, word-aligned chunks in any order (`COMM` may follow
+  `SSND`). Missing `COMM` or `SSND` is an error.
+- Sample rate: the 80-bit extended `COMM` value **rounded to the nearest integer, halves up**
+  (22050.5 → 22051).
+- The samples are the whole `SSND` chunk after its `offset` field; the `COMM` frame count is not
+  used. An `SSND` size below 8 (including 0) is an error, 0xFFFFFFFF or a size beyond the file
+  reads to the end of the file; a partial last frame is dropped.
+- Codec from the AIFF-C compression type (bit depth from `COMM`):
+
+  | Compression type | Codec |
+  |---|---|
+  | none (AIFF), `NONE`, `none`, `twos` | signed big-endian PCM, the bit depth rounded up to 8/16/24/32 (0–8 bits → 8-bit); above 32 unsupported |
+  | `sowt` | s16le (whatever the bit depth) |
+  | `raw ` | unsigned 8-bit |
+  | `in24` / `in32` | s24be / s32be |
+  | `fl32` `FL32` / `fl64` `FL64` | big-endian float32 / float64 |
+  | `alaw` `ALAW` / `ulaw` `ULAW` | G.711 |
+  | `ima4` | IMA4 ADPCM (below) |
+  | anything else (`QDM2`, `MAC3`, …) | unsupported |
+
+- Channel layout: the `CHAN` chunk (CoreAudio layout, below), else the default layout.
+
+### CAF (E)
+
+- `caff` version 1, and `desc` must be the first chunk (else an error). The float64 sample
+  rate is **truncated** to an integer (16000.75 → 16000).
+- `lpcm`: the sample size comes from the bits per channel alone, rounded up to 8/16/24/32
+  (bytes per packet is not used, but 0 is an error, as is 0 frames per packet). Format flag
+  bit 0 selects float (32 or 64 bits only), bit 1 little-endian. **8-bit `lpcm` is always
+  signed.** `alaw` / `ulaw`: G.711. `ima4`: IMA4 ADPCM (34 bytes per channel per packet, 64
+  frames). Other formats (`aac `, `alac`, …) are unsupported.
+- `data`: a 4-byte edit count, then the samples. A size of −1 (streamed), one that leaves no
+  samples (≤ 4) or one beyond the file reads to the end of the file — trailing chunks are then
+  decoded as samples, as ffmpeg does. A later `data` chunk replaces an earlier one. (Sizes 1–3
+  make ffmpeg misalign the data; asrfront reads to the end of the file. Damaged files only.)
+- Channel layout: the `chan` chunk (CoreAudio layout, below), else the default layout.
+
+### CoreAudio channel layouts (E)
+
+AIFF `CHAN` and CAF `chan` hold an `AudioChannelLayout`: a tag, a channel bitmap and channel
+descriptions. A chunk shorter than 12 bytes makes ffmpeg reject the file (so does asrfront).
+
+- **bitmap** (tag `0x10000`): a WAVE channel mask, with WAV's rules.
+- **descriptions** (tag 0): one label per channel — L, R, C, LFE → FL, FR, FC, LFE; Ls, Rs →
+  SL, SR; Rls, Rrs → BL, BR; Lc, Rc → FLC, FRC; Cs → BC; the top labels → TC, TFL, TFC, TFR,
+  TBL, TBC, TBR. Other labels (wide, LFE2, surround direct, Lt/Rt, ambisonic, discrete) get
+  weight 0. Fewer descriptions than channels: default layout.
+- **predefined tags**: the tag's low 16 bits must equal the channel count, else the default
+  layout. ffmpeg downmixes only tags whose channels are in its native order; those whose
+  weights differ from the default layout are Quadraphonic (FL FR SL SR), Cube (FL FR BL BR TFL
+  TFR TBL TBR), MPEG_3_0_A (FL FR FC), SMPTE_DTV (5.1 + Lt Rt), ITU_2_1 (FL FR BC), ITU_2_2
+  (FL FR SL SR), DVD_5 / 6 / 10 / 11 and AC3_1_0_1 (FC LFE). Unknown tags and the stereo
+  variants (headphones, matrix, M/S, XY, binaural) use the default layout.
+- ffmpeg **fails** on layouts outside its native channel order ("Input channel layout … is not
+  supported"), e.g. MPEG_7_1_C — which its own muxers write for 7.1 — or descriptions such as
+  C L R. asrfront uses the default layout for such tags and the label positions for such
+  descriptions (documented deviation; ffmpeg gives no output to compare with).
+
+### NIST SPHERE (E)
+
+- `NIST_1A`, the header size on the second line, then `key -type value` lines up to
+  `end_head`. Keys are matched by prefix and the last occurrence wins; the value is the third
+  token, read as a leading integer (`-r 8000.5` → 8000). `channel_count` and `sample_rate`
+  are required.
+- The samples start at the header size and run to the end of the file (`sample_count` is not
+  used). A header size beyond the file is an error (ffmpeg then starts after `end_head`).
+- `sample_coding` (case-insensitive, default `pcm`): `pcm` with `sample_n_bytes` 1 (signed
+  8-bit) or 2 (`sample_byte_format` `10`: big-endian; `01`, `1` or absent: little-endian);
+  3 or 4 bytes are not implemented in ffmpeg and unsupported here. `ulaw` / `mu-law` and
+  `alaw`: one byte per sample whatever `sample_n_bytes` says. Shorten-compressed files
+  (`pcm,embedded-shorten-v2.00`) are unsupported, in ffmpeg too.
+- Layout: the default layout for the channel count.
+
+### ADPCM (E)
+
+All three decode to **s16**: the int16 path at 16 kHz, the float path when resampled.
+
+- **IMA ADPCM** (WAV / Wave64 tag `0x0011`, 4 bits): each block holds per channel a 4-byte
+  header (s16 predictor = the first sample, step index ≤ 88, a zero byte — anything else makes
+  ffmpeg fail, and asrfront report a malformed file), then 4-byte groups per channel of 8
+  samples, low nibble first. Each nibble *n*: difference `((2·(n & 7) + 1) · step) >> 3`,
+  subtracted when `n & 8`, predictor clipped to s16; step index += −1, −1, −1, −1, 2, 4, 6, 8
+  for `n & 7`, clamped to 0…88. The block size must be a whole number of 4-byte groups per
+  channel. A partial last block decodes the whole groups it holds; the `fact` sample count is
+  not used (the padding of the last block is kept). 2/3/5-bit variants are unsupported. With
+  more than two channels ffmpeg cannot decode the stream at all (it leaves the channel layout
+  unset); asrfront decodes it with the default layout (documented deviation).
+- **Microsoft ADPCM** (tag `0x0002`, one or two channels): the block header holds per channel
+  the predictor index (≤ 6, else an error), delta, sample 1 and sample 2; the output starts with
+  sample 2, sample 1, then one sample per nibble (high nibble first; stereo alternates
+  channels). Prediction `(s1 · c1 + s2 · c2) / 256` **rounded toward zero**, plus `n · delta`
+  (`n` signed 4-bit), clipped to s16; then `delta = adapt[n] · delta / 256`, at least 16 and at
+  most `INT_MAX / 768`. The coefficients are always the seven standard pairs: ffmpeg ignores
+  the ones in the `fmt ` extension. A partial last block decodes its whole bytes.
+- **IMA4** (QuickTime; AIFF-C / CAF `ima4`): per channel 34-byte packets of 64 samples — a
+  2-byte header (predictor = its top 9 bits, step index = its low 7 bits, ≤ 88), then 32 bytes,
+  low nibble first. The difference is the reference shift-and-add (`step >> 3`, plus `step`,
+  `step >> 1`, `step >> 2` for nibble bits 2, 1, 0) — not the IMA WAV product, which differs in
+  rounding. The decoder state **carries over between packets** unless the header's step index
+  differs or its predictor is more than 0x7F away from the running predictor. A partial packet
+  is dropped.
+
+Not supported, by design: big-endian `RIFX` WAV — ffmpeg 7.0.2 reads its header big-endian but
+decodes the samples as little-endian (so a real RIFX file comes out as noise), and matching that
+would be useless; GSM 6.10 / G.722 / other WAV codecs.
 
 ### Raw PCM
 
@@ -312,6 +428,7 @@ C-vs-reference tests natively.
 | interpolated-mode resampling (non-standard rates) | ≤ 1 LSB |
 | float path vs. ffmpeg on non-FMA / ARM CPUs | ≤ 1 LSB (ffmpeg itself differs; aarch64 measured, see above) |
 | FLAC | bit-exact (same as WAV) |
+| Wave64, AIFF / AIFF-C, CAF, NIST SPHERE; IMA / MS / IMA4 ADPCM | bit-exact (same as WAV) |
 | MP3 | ≤ 1 LSB (~1 % of samples), same length and alignment |
 
 ## How this was measured
@@ -333,4 +450,12 @@ or f64 output (`-f f64le -acodec pcm_f64le`) to observe the double path without 
   200 000, for 10 rates; repeated with WAV and FLAC containers of different frame sizes
   (256/1152/4096) — the length does not depend on the container's block size
 
-`tests/python/test_ffmpeg_ref.py` re-checks these rules against the real ffmpeg.
+- containers and ADPCM (AIFF, CAF, Wave64, SPHERE): hand-built files varying one header
+  field at a time (compression types, bit depths, chunk sizes and order, rates, layout tags,
+  channel labels, SPHERE keys), decoded by ffmpeg to s16 at the native rate; ADPCM blocks with
+  chosen headers and nibbles, compared with candidate decoders (product vs. shift-and-add
+  difference, floor vs. truncating prediction, state reset vs. carry-over between packets);
+  downmix weights of layouts by least squares as above
+
+`tests/python/test_ffmpeg_ref.py` re-checks these rules against the real ffmpeg, and
+`tests/python/test_load.py` / `test_load_formats.py` the decoders.

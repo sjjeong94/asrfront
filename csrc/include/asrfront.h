@@ -107,7 +107,8 @@ typedef enum {
     AF_RAW_FORCE = 2  /* always raw PCM (.pcm/.raw path) */
 } af_raw_mode;
 
-/* Decode an in-memory audio file (WAV; raw PCM per `raw`) to 16 kHz mono float32,
+/* Decode an in-memory audio file (WAV, Wave64, AIFF, CAF, NIST SPHERE, FLAC, MP3; raw PCM
+ * per `raw`) to 16 kHz mono float32,
  * matching `ffmpeg -i FILE -f s16le -ac 1 -ar 16000` / 32768 (see docs/load.md).
  * On success *out is allocated by the library (release with af_audio_free) and
  * *n_samples is set; on error *out is NULL. */

@@ -101,7 +101,7 @@ select = ["E", "F", "W", "I", "B", "UP", "NPY"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["asrfront"]
-known-local-folder = ["audio_signals", "helpers", "reference"]
+known-local-folder = ["audio_signals", "helpers", "reference", "test_load"]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
