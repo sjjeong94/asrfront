@@ -9,7 +9,7 @@ ffmpeg -nostdin -threads 0 -i FILE -f s16le -ac 1 -acodec pcm_s16le -ar 16000 -
 followed by `int16 / 32768`. This document is the **behavior specification** the C
 implementation and the Python reference (`tests/python/reference.py`, section "ffmpeg load
 pipeline") are written from. It describes *what* ffmpeg outputs, not how ffmpeg's code is
-structured; see the license policy in `plan.md` §7.2.1.
+structured; see the license policy in [`design.md`](design.md#license-policy-clean-room-style).
 
 **Reference build**: ffmpeg **7.0.2** static (johnvansickle.com build shipped in
 `imageio-ffmpeg==0.6.0`, `uv sync --group load`), measured on x86-64 with **AVX2 + FMA3**
@@ -356,8 +356,9 @@ would be useless; GSM 6.10 / G.722 / other WAV codecs.
 
 Headerless s16le, 16 kHz, mono (`int16 / 32768`); an odd trailing byte is dropped. Selected by
 a `.pcm` / `.raw` file extension, or for bytes input without a recognized header (see
-`plan.md` §7.3 for the detection rules; MP3 sync detection requires two consecutive valid
-Layer III frame headers so that raw PCM is never taken for MP3).
+[`design.md`](design.md#format-detection) for the detection rules; MP3 sync detection
+requires two consecutive valid Layer III frame headers so that raw PCM is never taken for
+MP3).
 
 ## Resource use
 

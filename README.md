@@ -150,8 +150,8 @@ uv run cmake --build build/ctest && uv run ctest --test-dir build/ctest
 
 The C API is in [`csrc/include/asrfront.h`](https://github.com/sjjeong94/asrfront/blob/main/csrc/include/asrfront.h). The preprocessing of each
 model is documented step by step in [`docs/whisper.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/whisper.md) and
-[`docs/sensevoice.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/sensevoice.md); see [`plan.md`](https://github.com/sjjeong94/asrfront/blob/main/plan.md) for design and
-implementation notes.
+[`docs/sensevoice.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/sensevoice.md); see [`docs/design.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/design.md) for design
+decisions.
 
 ## License
 
