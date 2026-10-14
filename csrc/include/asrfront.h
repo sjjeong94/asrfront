@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define ASRFRONT_VERSION "0.1.0"
+#define ASRFRONT_VERSION "0.2.0"
 #define AF_SAMPLE_RATE 16000
 
 enum {

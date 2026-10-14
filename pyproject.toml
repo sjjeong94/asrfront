@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "asrfront"
-version = "0.1.0"
+dynamic = ["version"]  # from ASRFRONT_VERSION in csrc/include/asrfront.h
 description = "Super-fast, dependency-free C frontends (log-mel, kaldi fbank) for Whisper and SenseVoice ASR models"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -61,6 +61,12 @@ wheel.packages = ["src/asrfront"]
 # Stable ABI: one cp312-abi3 wheel serves CPython 3.12+; older Pythons get regular wheels.
 wheel.py-api = "cp312"
 wheel.exclude = ["asrfront/_ext.cpp"]
+
+# Single source of the version: the C header (also returned by af_version() / __version__).
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "csrc/include/asrfront.h"
+regex = '#define ASRFRONT_VERSION "(?P<value>[^"]+)"'
 
 [tool.cibuildwheel]
 # cp39-cp311 regular wheels + cp312 abi3 (also used for 3.13+, tested via test-skip below).

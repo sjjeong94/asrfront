@@ -1,6 +1,6 @@
 name: Wheels
 
-# Release: bump the version (pyproject.toml + csrc/include/asrfront.h), commit, then
+# Release: bump ASRFRONT_VERSION in csrc/include/asrfront.h (the only copy), commit, then
 #   git tag vX.Y.Z && git push origin vX.Y.Z
 # builds the sdist and all wheels, tests them and uploads them to PyPI.
 
@@ -22,9 +22,9 @@ jobs:
       - name: Check that the tag matches the package version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          version=$(sed -n 's/^#define ASRFRONT_VERSION "\(.*\)"$/\1/p' csrc/include/asrfront.h)
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match pyproject.toml version $version"
+            echo "::error::tag $GITHUB_REF_NAME does not match ASRFRONT_VERSION $version"
             exit 1
           fi
       - uses: astral-sh/setup-uv@v6
