@@ -194,7 +194,10 @@ All steps above run in one pass over the frames in `csrc/whisper.c`, 8 frames at
 1. **Gather** — for each block of 8 frames, interior frames point straight into the input;
    frames touching an edge (reflection or the virtual zero padding) are materialized in a
    small per-handle buffer. An 8×8 register transpose turns 8 frames into SIMD lanes and
-   applies the Hann window (`gather_packed`).
+   applies the Hann window (`gather_packed`). With `pad_or_trim`, blocks that start past the
+   input read only zero padding (the reflection at the 30 s end stays inside it too): their
+   output is the constant `log10_floor(0)`, computed once with the same kernel when the
+   handle is created, so these blocks skip steps 1–4 and match computed ones bit for bit.
 2. **FFT** — the 400-point real FFT is computed as a 200-point complex FFT of
    `z[i] = x[2i] + i·x[2i+1]` (Stockham autosort, radix 4·2·5·5), followed by the standard
    split step that recovers the 201 real-FFT bins; `|X|²` is fused into that step.

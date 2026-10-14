@@ -1,4 +1,5 @@
 /* Minimal C API tests (no framework). */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,43 @@ static void test_whisper(void) {
     cfg.n_mels = 64;
     CHECK(af_whisper_create(&cfg, &h) == AF_EINVAL && h == NULL);
     CHECK(af_whisper_create(NULL, &h) == AF_EINVAL);
+}
+
+/* pad_or_trim skips frames that read only zero padding: a short input must give exactly
+ * the output of the same input zero-padded to 30 s by the caller (nothing skipped). */
+static void test_whisper_silence_skip(void) {
+    static const size_t lens[] = {0,      1,      100,    159,    160,    161,    199,   200,
+                                  201,    399,    400,    401,    2361,   2400,   16000, 80000,
+                                  479000, 479758, 479800, 479959, 479960, 479999, 480000};
+    const size_t n_virt = 480000;
+    float *audio = malloc(n_virt * sizeof(float)), *padded = malloc(n_virt * sizeof(float));
+    float *a = malloc(128 * 3000 * sizeof(float)), *b = malloc(128 * 3000 * sizeof(float));
+    for (size_t i = 0; i < n_virt; i++)
+        audio[i] =
+            0.3f * sinf(0.01f * (float)i) + 0.01f * (float)((int)(i * 7919 % 1000) - 500) / 500.0f;
+    for (int n_mels = 80; n_mels <= 128; n_mels += 48) {
+        af_whisper_config cfg;
+        af_whisper *h = NULL;
+        af_whisper_default_config(&cfg);
+        cfg.n_mels = n_mels;
+        CHECK(af_whisper_create(&cfg, &h) == AF_OK);
+        for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+            const size_t n = lens[i];
+            memcpy(padded, audio, n * sizeof(float));
+            memset(padded + n, 0, (n_virt - n) * sizeof(float));
+            CHECK(af_whisper_log_mel(h, audio, n, a) == AF_OK);
+            CHECK(af_whisper_log_mel(h, padded, n_virt, b) == AF_OK);
+            if (memcmp(a, b, (size_t)n_mels * 3000 * sizeof(float)) != 0) {
+                fprintf(stderr, "silence skip mismatch: n_mels=%d n=%zu\n", n_mels, n);
+                failures++;
+            }
+        }
+        af_whisper_destroy(h);
+    }
+    free(audio);
+    free(padded);
+    free(a);
+    free(b);
 }
 
 static void test_sensevoice(void) {
@@ -76,6 +114,7 @@ static void test_misc(void) {
 
 int main(void) {
     test_whisper();
+    test_whisper_silence_skip();
     test_sensevoice();
     test_misc();
     if (failures) {

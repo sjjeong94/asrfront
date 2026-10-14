@@ -270,6 +270,20 @@ Single thread; Whisper with `pad_or_trim=False` so that the work scales with the
   their cost grows faster than linearly between 10 s and 30 s (cache effects in the batched
   STFT / matmul), which is why the speed-up is lowest around 5–10 s.
 
+With `pad_or_trim=True` (the default) the output always has 3000 frames, but blocks of
+frames that read only the zero padding are filled with their known output instead of being
+computed (`docs/whisper.md`). Measured 2026-10-14 on the same machine, C API, best of 200:
+
+| Length | before | after |
+|---|---|---|
+| 1 s | 1.38 ms | 0.13 ms |
+| 5 s | 1.31 ms | 0.23 ms |
+| 10 s | 1.23 ms | 0.36 ms |
+| 30 s | 0.89 ms | 0.89 ms |
+
+Before this, short inputs were slower than 30 s ones: every padding frame was built by the
+scalar edge path and then went through FFT, mel and log.
+
 ## 4. Batches and threads
 
 `whisper.log_mel_batch` / `sensevoice.fbank_batch` on 32 × 30 s (= 16 minutes of audio),

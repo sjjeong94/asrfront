@@ -27,6 +27,7 @@ struct af_whisper {
     float scr_re[WHISPER_HALF * AF_VL], scr_im[WHISPER_HALF * AF_VL];
     float power[WHISPER_N_BINS * AF_VL];
     float melv[WHISPER_MAX_MELS * AF_VL];
+    float silence; /* log-mel of an all-zero frame (every mel bin), before normalization */
 };
 
 void af_whisper_default_config(af_whisper_config *cfg) {
@@ -59,6 +60,11 @@ int af_whisper_create(const af_whisper_config *cfg, af_whisper **out) {
     for (int i = 0; i < WHISPER_N_FFT; i++)
         h->window[i] =
             (float)(0.5 - 0.5 * cos(6.283185307179586476925286766559 * i / WHISPER_N_FFT));
+    /* An all-zero frame has zero power and mel energies, so its output is log10_floor(0).
+     * Computed with the same kernel, so skipped frames match computed ones bit for bit. */
+    float zero[AF_VL] = {0};
+    h->k->log10_floor(zero, AF_VL, 1e-10f);
+    h->silence = zero[0];
     *out = h;
     return AF_OK;
 }
@@ -101,6 +107,14 @@ static const float *frame_src(const float *audio, size_t n_in, size_t n_virt, si
     return edge;
 }
 
+/* Whether frame t reads only pad_or_trim zero padding: it starts at or after n_in. Samples
+ * reflected back from past n_virt - 1 are padding too: only the last frame (t = 2999)
+ * reflects, back to index 2 * (n_virt - 1) - (t * hop + pad - 1) = 479959, while a silent
+ * frame needs n_in <= t * hop - pad = 479640. */
+static int frame_silent(size_t n_in, size_t t) {
+    return t * WHISPER_HOP >= n_in + WHISPER_PAD;
+}
+
 int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, float *out) {
     if (!h || !out || (!audio && n_samples))
         return AF_EINVAL;
@@ -122,6 +136,15 @@ int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, floa
 
     for (size_t t0 = 0; t0 < n_frames; t0 += AF_VL) {
         const int count = n_frames - t0 < AF_VL ? (int)(n_frames - t0) : AF_VL;
+        /* Short inputs padded to 30 s: most blocks are silence, with a known output. */
+        if (n_in < n_virt && frame_silent(n_in, t0)) { /* then later frames are silent too */
+            for (int m = 0; m < n_mels; m++) {
+                float *dst = out + (size_t)m * n_frames + t0;
+                for (int l = 0; l < count; l++)
+                    dst[l] = h->silence;
+            }
+            continue;
+        }
         const float *src[AF_VL];
         for (int l = 0; l < AF_VL; l++) /* unused lanes of the last block repeat lane 0 */
             src[l] = l < count ? frame_src(audio, n_in, n_virt, t0 + l, h->edge[l]) : src[0];
