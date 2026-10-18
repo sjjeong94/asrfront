@@ -65,8 +65,10 @@ int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out) {
      * or larger than what a truncated file holds. It is a hint only, never trusted beyond the
      * input size: a 10 kB file claiming 2^28 frames must not allocate gigabytes up front. */
     size_t cap = 65536 + size; /* frames; enough for any common compression ratio */
+    /* One frame more than the header's total, so that a truthful total ends with a short read
+     * (n < cap) instead of growing the full buffer just before EOF. */
     if (f->totalPCMFrameCount > 0 && f->totalPCMFrameCount < cap)
-        cap = (size_t)f->totalPCMFrameCount;
+        cap = (size_t)f->totalPCMFrameCount + 1;
     size_t n = 0;
     int32_t *pcm = malloc(cap * (size_t)ch * sizeof(int32_t));
     while (pcm) {
