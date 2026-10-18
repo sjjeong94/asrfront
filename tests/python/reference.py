@@ -130,6 +130,42 @@ def whisper_log_mel(audio: np.ndarray, n_mels: int = 80, pad_or_trim: bool = Tru
     return whisper_log_mel_stages(audio, n_mels, pad_or_trim)["out"]
 
 
+def whisper_log_mel_padded(audio: np.ndarray, n_mels: int, n_padded: int) -> np.ndarray:
+    """Whisper log-mel without pad_or_trim of ``audio`` zero-padded to ``n_padded`` samples
+    (transformers' ``WhisperFeatureExtractor`` batches with ``padding=True``)."""
+    padded = np.zeros(n_padded, dtype=np.float64)
+    padded[: len(audio)] = audio
+    return whisper_log_mel(padded, n_mels, pad_or_trim=False)
+
+
+def qwen3_asr_transformers(audios: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Qwen3-ASR's feature extraction: transformers' ``WhisperFeatureExtractor`` configured by
+    the checkpoints' ``preprocessor_config.json`` and called as ``Qwen3ASRProcessor`` does.
+    Returns ``(features (B, 128, T), attention mask sums (B,))``. Needs the ``qwen`` and
+    ``ref`` dependency groups."""
+    from transformers import WhisperFeatureExtractor
+
+    fe = WhisperFeatureExtractor(
+        feature_size=128,
+        sampling_rate=16000,
+        hop_length=160,
+        chunk_length=30,
+        n_fft=400,
+        padding_value=0.0,
+        dither=0.0,
+        return_attention_mask=True,
+    )
+    out = fe(
+        [np.asarray(a, dtype=np.float32) for a in audios],
+        sampling_rate=16000,
+        padding=True,
+        truncation=False,
+        return_attention_mask=True,
+        return_tensors="np",
+    )
+    return out["input_features"], out["attention_mask"].sum(-1)
+
+
 def load_whisper_mel_filters(path: str | Path, n_mels: int) -> np.ndarray:
     """Load ``mel_{n_mels}`` from whisper's ``assets/mel_filters.npz`` (float32)."""
     with np.load(path, allow_pickle=False) as f:

@@ -55,14 +55,14 @@ jobs:
           uv run --no-sync ctest --test-dir build/ctest -C Release --output-on-failure
 
   reference:
-    # Compare against the original float32 libraries (torch, torchaudio) and ffmpeg 7.0.2
-    # (imageio-ffmpeg). ffmpeg's float resampler is bit-exact vs. the spec only on AVX2+FMA3
+    # Compare against the original float32 libraries (torch, torchaudio, transformers 4.57.6
+    # for Qwen3-ASR) and ffmpeg 7.0.2 (imageio-ffmpeg). ffmpeg's float resampler is bit-exact vs. the spec only on AVX2+FMA3
     # runners; the tests fall back to 1 LSB elsewhere.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --group ref --group load
+      - run: uv sync --group ref --group load --group qwen
       - run: uv run --no-sync pytest -q
 
   ffmpeg-macos:

@@ -1,0 +1,157 @@
+"""Qwen3-ASR (0.6B / 1.7B) input features.
+
+The models use transformers' ``WhisperFeatureExtractor`` with 128 mel bins, called with
+``padding=True`` and ``truncation=False``: Whisper's log-mel spectrogram over the whole input,
+without padding or trimming to 30 s.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any, overload
+
+import numpy as np
+import numpy.typing as npt
+
+from . import _ext
+from ._audio import as_audio, as_audio_list, cached_frontend, check_int, run_parallel
+
+SAMPLE_RATE = 16000
+N_FFT = 400
+HOP_LENGTH = 160
+N_MELS = 128
+
+__all__ = [
+    "log_mel",
+    "log_mel_batch",
+    "num_audio_tokens",
+    "SAMPLE_RATE",
+    "N_FFT",
+    "HOP_LENGTH",
+    "N_MELS",
+]
+
+_MIN_SAMPLES = N_FFT // 2 + 1  # the centered STFT's reflect padding needs more than 200
+
+
+def _frontend() -> _ext.WhisperFrontend:
+    return cached_frontend(
+        ("whisper", N_MELS, False),  # the same handle as whisper.log_mel(n_mels=128, ...)
+        lambda: _ext.WhisperFrontend(n_mels=N_MELS, pad_or_trim=False),
+    )
+
+
+def _check_length(n: int, name: str) -> None:
+    if n < _MIN_SAMPLES:
+        raise ValueError(f"{name} needs more than {N_FFT // 2} samples, got {n}")
+
+
+def log_mel(audio: Any) -> np.ndarray:
+    """Compute Qwen3-ASR's input features for one waveform.
+
+    Equivalent to ``WhisperFeatureExtractor(feature_size=128)(audio, padding=True,
+    truncation=False)`` for a single input (also what the vLLM backend computes per request).
+
+    Args:
+        audio: 16 kHz mono waveform: float array in [-1, 1], int16 PCM, list, or CPU
+            torch tensor.
+
+    Returns:
+        float32 array of shape ``(128, len(audio) // 160)``.
+
+    Raises:
+        ValueError: ``audio`` is not 1-D, contains NaN / inf, or has at most 200 samples.
+        TypeError: ``audio`` has an unsupported dtype.
+    """
+    audio = as_audio(audio)
+    _check_length(audio.shape[0], "audio")
+    return _frontend().log_mel(audio)
+
+
+def log_mel_batch(
+    audios: Sequence[Any] | np.ndarray,
+    n_threads: int | None = None,
+    hf_padding: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute :func:`log_mel` for many waveforms in parallel, padded to a common length.
+
+    Args:
+        audios: sequence of 1-D waveforms (any lengths), or a 2-D ``(B, N)`` array.
+        n_threads: worker threads; ``None`` uses all available cores.
+        hf_padding: reproduce the transformers backend's batches, where every waveform is
+            zero-padded to the longest one *before* the STFT: the last frames of shorter items
+            then see zeros instead of the reflection, so an item's features depend on the
+            batch it is in. By default every item is computed on its own (as by
+            :func:`log_mel` and the vLLM backend).
+
+    Returns:
+        ``(features, lengths)``: float32 ``(B, 128, T)`` and int32 ``(B,)`` valid frames per
+        item (the ``feature_attention_mask`` sums).
+
+        - default: item ``i`` is ``log_mel(audios[i])`` in ``features[i, :, :lengths[i]]``,
+          ``lengths[i] = len_i // 160``, followed by zeros; ``T = max(lengths)``.
+        - ``hf_padding=True``: ``T = L // 160`` for the longest length ``L``, every frame
+          computed, ``lengths[i] = min(ceil(len_i / 160), T)``.
+    """
+    items = as_audio_list(audios)
+    fe = _frontend()
+    sizes = [a.shape[0] for a in items]
+
+    if hf_padding:
+        n_padded = max(sizes, default=0)
+        if items:
+            _check_length(n_padded, "the longest item")
+        n_frames = n_padded // HOP_LENGTH
+        lengths = np.array([min(-(-n // HOP_LENGTH), n_frames) for n in sizes], np.int32)
+        feats = np.empty((len(items), N_MELS, n_frames), dtype=np.float32)
+
+        def work(i: int) -> None:
+            _frontend().log_mel_padded(items[i], n_padded, out=feats[i])
+
+    else:
+        for i, n in enumerate(sizes):
+            _check_length(n, f"audios[{i}]")
+        lengths = np.array([fe.out_frames(n) for n in sizes], dtype=np.int32)
+        n_frames = int(lengths.max()) if items else 0
+        feats = np.zeros((len(items), N_MELS, n_frames), dtype=np.float32)
+
+        def work(i: int) -> None:
+            if lengths[i] == n_frames:  # writes straight into the (contiguous) row
+                _frontend().log_mel(items[i], out=feats[i])
+            else:
+                feats[i, :, : lengths[i]] = _frontend().log_mel(items[i])
+
+    run_parallel(work, len(items), n_threads)
+    return feats, lengths
+
+
+def _tokens(n: Any) -> Any:  # ints or int64 arrays
+    r = n % 100
+    for _ in range(3):
+        r = -(-r // 2)  # a stride-2 convolution: ceil(r / 2)
+    return n // 100 * 13 + r
+
+
+@overload
+def num_audio_tokens(n_frames: int) -> int: ...
+@overload
+def num_audio_tokens(n_frames: npt.ArrayLike) -> np.ndarray: ...
+def num_audio_tokens(n_frames: Any) -> Any:
+    """Number of audio tokens the encoder produces from ``n_frames`` feature frames.
+
+    The encoder works on windows of 100 frames, each reduced by three stride-2 convolutions
+    to 13 tokens; a last partial window of ``r`` frames gives ``ceil(ceil(ceil(r / 2) / 2) /
+    2)`` tokens. Qwen3-ASR's prompt holds this many audio placeholder tokens per input.
+
+    Args:
+        n_frames: frame count(s), e.g. the ``lengths`` of :func:`log_mel_batch`.
+    """
+    if isinstance(n_frames, (int, np.integer)) and not isinstance(n_frames, bool):
+        return int(_tokens(check_int("n_frames", n_frames, 0)))
+    arr = np.asarray(n_frames)
+    if arr.dtype.kind not in "iu":
+        raise TypeError(f"n_frames must be integers, got dtype {arr.dtype}")
+    arr = arr.astype(np.int64)
+    if (arr < 0).any():
+        raise ValueError("n_frames must be >= 0")
+    return _tokens(arr)

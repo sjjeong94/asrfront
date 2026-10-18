@@ -61,6 +61,13 @@ size_t af_whisper_out_frames(const af_whisper *h, size_t n_samples);
 /* out: (n_mels, out_frames) float32, row-major. */
 int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, float *out);
 
+/* The same over the input followed by zeros up to n_padded samples, as when it is padded to
+ * the longest item of a batch before the STFT (transformers' WhisperFeatureExtractor with
+ * padding=True, used by Qwen3-ASR). Handles with pad_or_trim = 0 only; n_samples <= n_padded
+ * and n_padded > 200. out: (n_mels, n_padded / 160). */
+int af_whisper_log_mel_padded(af_whisper *h, const float *audio, size_t n_samples, size_t n_padded,
+                              float *out);
+
 /* ------------------------------------------------------------------------ */
 /* SenseVoice fbank (kaldi fbank + LFR + CMVN, as in FunASR WavFrontend)    */
 /* ------------------------------------------------------------------------ */

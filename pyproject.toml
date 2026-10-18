@@ -47,6 +47,9 @@ dev = [
 load = [
     "imageio-ffmpeg==0.6.0",  # bundles ffmpeg 7.0.2 (reference for asrfront.load)
 ]
+qwen = [
+    "transformers==4.57.6",  # the version qwen-asr pins (reference for asrfront.qwen3_asr)
+]
 ref = [
     "soundfile>=0.13.1",
     "torch>=2.8.0",

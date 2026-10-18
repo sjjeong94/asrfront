@@ -1,7 +1,7 @@
 # asrfront
 
-Super-fast frontend (feature extraction) for ASR models such as **Whisper** and
-**SenseVoiceSmall**.
+Super-fast frontend (feature extraction) for ASR models such as **Whisper**,
+**SenseVoiceSmall** and **Qwen3-ASR**.
 
 - native C core with no dependencies (own FFT, SIMD kernels with runtime CPU dispatch)
 - audio loading: WAV / AIFF / CAF / FLAC / MP3 / raw PCM (and more) → 16 kHz mono, matching
@@ -15,6 +15,7 @@ import asrfront
 audio = asrfront.load("speech.mp3")  # 16 kHz mono float32
 mel = asrfront.whisper.log_mel(audio)  # (80, 3000)
 feat = asrfront.sensevoice.fbank(audio, cmvn="am.mvn")  # (T', 560)
+mel = asrfront.qwen3_asr.log_mel(audio)  # (128, T)
 ```
 
 ## Install
@@ -92,6 +93,23 @@ waveform with a Hamming window, `dither=0`, then LFR `m=7, n=6` and CMVN from `a
 `dither=` and `seed=` are available; the RNG is reseeded on every call so identical inputs
 give identical outputs.
 
+### Qwen3-ASR
+
+```python
+from asrfront import qwen3_asr
+
+mel = qwen3_asr.log_mel(audio)  # (128, len(audio) // 160), no 30 s pad / trim
+feats, lengths = qwen3_asr.log_mel_batch([a1, a2])  # (2, 128, T) zero-padded, valid frames
+feats, lengths = qwen3_asr.log_mel_batch([a1, a2], hf_padding=True)  # transformers batches
+n_tokens = qwen3_asr.num_audio_tokens(lengths)  # audio placeholders in the prompt
+```
+
+Equivalent to the `WhisperFeatureExtractor` (128 mels) of Qwen3-ASR-0.6B / 1.7B as
+`Qwen3ASRProcessor` calls it (`padding=True`, `truncation=False`). By default every item is
+computed on its own (as vLLM does); `hf_padding=True` reproduces the transformers backend,
+which zero-pads a batch to its longest item before the STFT, so an item's last frames depend
+on the batch. Details: [`docs/qwen3_asr.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/qwen3_asr.md).
+
 ### Threads
 
 All native calls release the GIL. The `*_batch` functions spread items over a thread pool
@@ -129,6 +147,7 @@ tones, chirp, noise, clipping, DC offset, real speech, short and > 30 s inputs):
 | | worst case | speech | target |
 |---|---|---|---|
 | Whisper log-mel (80 and 128 mels) | 4.0e-5 | 1.3e-5 | 1e-4 |
+| Qwen3-ASR (vs. transformers 4.57.6, float32) | 6.7e-5 | 2.0e-5 | 1e-4 |
 | kaldi fbank (log domain) | 7.7e-4 | 2.0e-4 | 1e-3 |
 | SenseVoice features with SenseVoiceSmall's `am.mvn` | 1.1e-4 | | |
 
@@ -142,6 +161,7 @@ fbank (torchaudio builds its mel banks in float32).
 uv sync                       # create .venv and build the extension (needs a C compiler)
 uv run pytest                 # tests; add --group ref for torch/torchaudio comparisons
 uv run --group ref --group load pytest   # + comparisons against ffmpeg 7.0.2 (imageio-ffmpeg)
+uv run --group ref --group qwen pytest   # + Qwen3-ASR vs. transformers 4.57.6
 # on aarch64 / Apple silicon ffmpeg's float path differs by 1 LSB from x86, so those
 # comparisons allow 1 LSB there (docs/load.md, "Other platforms")
 uv run cmake -S . -B build/ctest -G Ninja -DASRFRONT_BUILD_TESTS=ON -DASRFRONT_BUILD_BENCH=ON
@@ -149,8 +169,9 @@ uv run cmake --build build/ctest && uv run ctest --test-dir build/ctest
 ```
 
 The C API is in [`csrc/include/asrfront.h`](https://github.com/sjjeong94/asrfront/blob/main/csrc/include/asrfront.h). The preprocessing of each
-model is documented step by step in [`docs/whisper.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/whisper.md) and
-[`docs/sensevoice.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/sensevoice.md); see [`docs/design.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/design.md) for design
+model is documented step by step in [`docs/whisper.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/whisper.md),
+[`docs/sensevoice.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/sensevoice.md) and
+[`docs/qwen3_asr.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/qwen3_asr.md); see [`docs/design.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/design.md) for design
 decisions.
 
 ## License

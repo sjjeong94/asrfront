@@ -105,6 +105,13 @@ struct Whisper {
         return compute_into((size_t)n_mels, frames, out,
                             [&](float *o) { return af_whisper_log_mel(h, audio.data(), n, o); });
     }
+
+    nb::object log_mel_padded(Audio audio, size_t n_padded, OutArg out) {
+        size_t n = audio.shape(0);
+        return compute_into((size_t)n_mels, n_padded / 160, out, [&](float *o) {
+            return af_whisper_log_mel_padded(h, audio.data(), n, n_padded, o);
+        });
+    }
 };
 
 struct SenseVoice {
@@ -263,7 +270,11 @@ NB_MODULE(_ext, m) {
         .def("log_mel", &Whisper::log_mel, "audio"_a,
              nb::arg("out").none().noconvert() = nb::none(),
              "Log-mel spectrogram (n_mels, out_frames). With `out`, writes into it and returns "
-             "None.");
+             "None.")
+        .def("log_mel_padded", &Whisper::log_mel_padded, "audio"_a, "n_padded"_a,
+             nb::arg("out").none().noconvert() = nb::none(),
+             "Log-mel spectrogram of `audio` followed by zeros up to `n_padded` samples, "
+             "(n_mels, n_padded // 160). Needs pad_or_trim=False.");
 
     nb::class_<SenseVoice>(m, "SenseVoiceFrontend")
         .def(nb::init<int, int, int, float, unsigned long long, std::optional<Vec>,

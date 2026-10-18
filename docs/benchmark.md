@@ -1,5 +1,7 @@
 # Benchmark
 
+Qwen3-ASR features (`asrfront.qwen3_asr`): see [`qwen3_asr.md`](qwen3_asr.md#performance).
+
 ## Apple M1 optimization results (2026-10-12)
 
 The three changes were evaluated in order: a NEON 4×4 transpose for Whisper's

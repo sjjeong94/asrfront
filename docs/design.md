@@ -8,8 +8,8 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
 
 ## Goals and principles
 
-- **Scope**: produce the exact input of Whisper (`log_mel`) and SenseVoiceSmall (`fbank` + LFR +
-  CMVN), and load audio files into the 16 kHz mono waveform both expect. Nothing else: no
+- **Scope**: produce the exact input of Whisper (`log_mel`), SenseVoiceSmall (`fbank` + LFR +
+  CMVN) and Qwen3-ASR (Whisper's log-mel with 128 mels, no pad / trim), and load audio files into the 16 kHz mono waveform both expect. Nothing else: no
   general-purpose DSP, no GPU, no streaming (yet, see [Open items](#open-items)).
 - **No dependencies**: the C core links only libc/libm. The FFT and SIMD kernels are written
   in-house; FLAC/MP3 decoding uses vendored single-header decoders (dr_flac / dr_mp3, public
@@ -42,6 +42,10 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
   loader is the exception (the decoded length is unknown up front), so it allocates and provides
   `af_audio_free`.
 - **Handles are not thread-safe** (they own scratch buffers): use one per thread.
+- **Qwen3-ASR reuses the Whisper handle** (128 mels, no pad / trim): its only C addition is
+  `af_whisper_log_mel_padded`, the Whisper computation over virtual zeros up to any length
+  (`pad_or_trim` is the case of 480 000), which reproduces transformers' batches padded to
+  their longest item before the STFT.
 - **Error codes** are negative ints; `*_create` returns the handle through an out-parameter so
   invalid arguments and allocation failures can be told apart.
 - **No threading inside the core**: a 30 s input takes about 1 ms, so starting and synchronizing
@@ -183,6 +187,8 @@ This is not legal advice; revisit it if the project is used under stricter requi
   processing changes the result; only whole-input processing is supported. A streaming kaldi
   fbank would be straightforward (frames are independent).
 - **More models**: presets for other frontends (Paraformer, other Whisper-style models, ...).
+- **Qwen3-ASR**: long-audio chunking (`qwen-asr` cuts at low-energy points) and a librosa /
+  soxr-compatible loader are not provided ([`qwen3_asr.md`](qwen3_asr.md)).
 - **Model-level checks**: end-to-end checks compare features, not decoded text (no model weights
   in the test environment).
 - **Platforms**: MSVC and running on Windows / macOS are verified only in CI, not locally.

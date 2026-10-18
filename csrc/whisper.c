@@ -86,7 +86,7 @@ size_t af_whisper_out_frames(const af_whisper *h, size_t n_samples) {
 
 /*
  * Start of frame t of the reflect-padded virtual signal v, where v[i] = audio[i] for
- * i < n_in and 0 for n_in <= i < n_virt (pad_or_trim zero padding). Frame t covers
+ * i < n_in and 0 for n_in <= i < n_virt (zero padding). Frame t covers
  * v[t * hop - pad, t * hop + pad); indices outside [0, n_virt) are reflected. Interior
  * frames point into `audio`; edge frames are materialized in `edge`.
  */
@@ -107,37 +107,31 @@ static const float *frame_src(const float *audio, size_t n_in, size_t n_virt, si
     return edge;
 }
 
-/* Whether frame t reads only pad_or_trim zero padding: it starts at or after n_in. Samples
- * reflected back from past n_virt - 1 are padding too: only the last frame (t = 2999)
- * reflects, back to index 2 * (n_virt - 1) - (t * hop + pad - 1) = 479959, while a silent
- * frame needs n_in <= t * hop - pad = 479640. */
-static int frame_silent(size_t n_in, size_t t) {
-    return t * WHISPER_HOP >= n_in + WHISPER_PAD;
+/* Whether frames t0 .. t1 read only zero padding (indices n_in .. n_virt - 1): the first one
+ * starts at or after n_in, and the samples the last one reflects back from past n_virt - 1
+ * (the furthest back is 2 * (n_virt - 1) - (t1 * hop + pad - 1)) are padding too. With 30 s of
+ * pad_or_trim only frame 2999 reflects, to 479959, past any silent frame's start; with a
+ * padding of a few samples the reflection reaches back into the input. */
+static int frames_silent(size_t n_in, size_t n_virt, size_t t0, size_t t1) {
+    if (t0 * WHISPER_HOP < n_in + WHISPER_PAD)
+        return 0;
+    const size_t end = t1 * WHISPER_HOP + WHISPER_PAD; /* one past the last index read */
+    return end <= n_virt || 2 * (n_virt - 1) - (end - 1) >= n_in;
 }
 
-int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, float *out) {
-    if (!h || !out || (!audio && n_samples))
-        return AF_EINVAL;
-
-    size_t n_virt, n_in;
-    if (h->cfg.pad_or_trim) {
-        n_virt = WHISPER_N_SAMPLES;
-        n_in = n_samples < n_virt ? n_samples : n_virt;
-    } else {
-        /* Reflect padding needs pad < length (torch raises otherwise). */
-        if (n_samples <= WHISPER_PAD)
-            return AF_EINVAL;
-        n_virt = n_in = n_samples;
-    }
-
+/* Frames of the input virtually zero-padded to n_virt samples (n_in <= n_virt, 200 < n_virt):
+ * n_virt / hop frames of the reflect-padded centered STFT, the last one dropped. */
+static void log_mel_virtual(af_whisper *h, const float *audio, size_t n_in, size_t n_virt,
+                            float *out) {
     const af_kernels *k = h->k;
-    const size_t n_frames = af_whisper_out_frames(h, n_samples);
+    const size_t n_frames = n_virt / WHISPER_HOP;
     const int n_mels = h->cfg.n_mels;
 
     for (size_t t0 = 0; t0 < n_frames; t0 += AF_VL) {
         const int count = n_frames - t0 < AF_VL ? (int)(n_frames - t0) : AF_VL;
-        /* Short inputs padded to 30 s: most blocks are silence, with a known output. */
-        if (n_in < n_virt && frame_silent(n_in, t0)) { /* then later frames are silent too */
+        /* Short inputs padded to 30 s (or to a long batch item): most blocks are silence,
+         * with a known output. */
+        if (n_in < n_virt && frames_silent(n_in, n_virt, t0, t0 + (size_t)count - 1)) {
             for (int m = 0; m < n_mels; m++) {
                 float *dst = out + (size_t)m * n_frames + t0;
                 for (int l = 0; l < count; l++)
@@ -146,7 +140,8 @@ int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, floa
             continue;
         }
         const float *src[AF_VL];
-        for (int l = 0; l < AF_VL; l++) /* unused lanes of the last block repeat lane 0 */
+        src[0] = frame_src(audio, n_in, n_virt, t0, h->edge[0]);
+        for (int l = 1; l < AF_VL; l++) /* unused lanes of the last block repeat lane 0 */
             src[l] = l < count ? frame_src(audio, n_in, n_virt, t0 + l, h->edge[l]) : src[0];
         k->gather_packed(src, WHISPER_N_FFT, h->window, h->re, h->im);
         k->rfft_power(h->fft, h->re, h->im, h->scr_re, h->scr_im, h->power);
@@ -162,5 +157,28 @@ int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, floa
 
     /* Dynamic range compression against the global max, then scale. */
     k->whisper_normalize(out, (size_t)n_mels * n_frames);
+}
+
+int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, float *out) {
+    if (!h || !out || (!audio && n_samples))
+        return AF_EINVAL;
+    if (h->cfg.pad_or_trim) {
+        const size_t n_in = n_samples < WHISPER_N_SAMPLES ? n_samples : WHISPER_N_SAMPLES;
+        log_mel_virtual(h, audio, n_in, WHISPER_N_SAMPLES, out);
+        return AF_OK;
+    }
+    /* Reflect padding needs pad < length (torch raises otherwise). */
+    if (n_samples <= WHISPER_PAD)
+        return AF_EINVAL;
+    log_mel_virtual(h, audio, n_samples, n_samples, out);
+    return AF_OK;
+}
+
+int af_whisper_log_mel_padded(af_whisper *h, const float *audio, size_t n_samples, size_t n_padded,
+                              float *out) {
+    if (!h || !out || (!audio && n_samples) || h->cfg.pad_or_trim || n_samples > n_padded ||
+        n_padded <= WHISPER_PAD)
+        return AF_EINVAL;
+    log_mel_virtual(h, audio, n_samples, n_padded, out);
     return AF_OK;
 }

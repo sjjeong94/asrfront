@@ -31,6 +31,7 @@ def _run(fes, audio):
     out = [w80.log_mel(audio), sv.fbank(audio), sv.fbank_raw(audio), svd.fbank_raw(audio)]
     if audio.size > 200:
         out.append(w128.log_mel(audio))
+    out.append(w128.log_mel_padded(audio, audio.size + 333))  # qwen3_asr hf_padding batches
     return out
 
 

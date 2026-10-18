@@ -75,6 +75,56 @@ static void test_whisper_silence_skip(void) {
     free(b);
 }
 
+/* af_whisper_log_mel_padded: the same output as an explicitly zero-padded input (no skipped
+ * blocks) for paddings around a frame, a hop and the reflection length, where skipped blocks
+ * meet frames that reflect back into the input. */
+static void test_whisper_padded(void) {
+    static const size_t lens[] = {201, 400, 1000, 1601, 16000, 16123};
+    static const size_t extra[] = {0,   1,   40,  159, 160,  161,  199,  200,  201,   239,
+                                   240, 241, 360, 361, 1280, 1281, 1500, 2000, 16000, 50000};
+    const size_t cap = 16123 + 50000;
+    float *audio = malloc(cap * sizeof(float)), *padded = malloc(cap * sizeof(float));
+    float *a = malloc(128 * (cap / 160) * sizeof(float)),
+          *b = malloc(128 * (cap / 160) * sizeof(float));
+    for (size_t i = 0; i < cap; i++)
+        audio[i] =
+            0.3f * sinf(0.013f * (float)i) + 0.01f * (float)((int)(i * 7919 % 1000) - 500) / 500.0f;
+    af_whisper_config cfg;
+    af_whisper *h = NULL;
+    af_whisper_default_config(&cfg);
+    cfg.n_mels = 128;
+    cfg.pad_or_trim = 0;
+    CHECK(af_whisper_create(&cfg, &h) == AF_OK);
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        for (size_t j = 0; j < sizeof(extra) / sizeof(extra[0]); j++) {
+            const size_t n = lens[i], n_padded = n + extra[j];
+            memcpy(padded, audio, n * sizeof(float));
+            memset(padded + n, 0, (n_padded - n) * sizeof(float));
+            CHECK(af_whisper_log_mel_padded(h, audio, n, n_padded, a) == AF_OK);
+            CHECK(af_whisper_log_mel(h, padded, n_padded, b) == AF_OK);
+            if (memcmp(a, b, 128 * (n_padded / 160) * sizeof(float)) != 0) {
+                fprintf(stderr, "padded mismatch: n=%zu n_padded=%zu\n", n, n_padded);
+                failures++;
+            }
+        }
+    }
+    /* tiny inputs in a long padding: all but the first frames are silent */
+    CHECK(af_whisper_log_mel_padded(h, audio, 0, 16000, a) == AF_OK);
+    CHECK(af_whisper_log_mel_padded(h, audio, 1, 16000, a) == AF_OK);
+    CHECK(af_whisper_log_mel_padded(h, audio, 10, 10, a) == AF_EINVAL);     /* <= 200 */
+    CHECK(af_whisper_log_mel_padded(h, audio, 1001, 1000, a) == AF_EINVAL); /* longer */
+    CHECK(af_whisper_log_mel_padded(h, NULL, 10, 1000, a) == AF_EINVAL);
+    af_whisper_destroy(h);
+    af_whisper_default_config(&cfg); /* pad_or_trim handles have their own padding */
+    CHECK(af_whisper_create(&cfg, &h) == AF_OK);
+    CHECK(af_whisper_log_mel_padded(h, audio, 1000, 2000, a) == AF_EINVAL);
+    af_whisper_destroy(h);
+    free(audio);
+    free(padded);
+    free(a);
+    free(b);
+}
+
 static void test_sensevoice(void) {
     af_sensevoice_config cfg;
     af_sensevoice *h = NULL;
@@ -115,6 +165,7 @@ static void test_misc(void) {
 int main(void) {
     test_whisper();
     test_whisper_silence_skip();
+    test_whisper_padded();
     test_sensevoice();
     test_misc();
     if (failures) {
