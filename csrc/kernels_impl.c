@@ -510,16 +510,15 @@ static void kaldi_prep(const float *frames, int len, const float *window, float 
         mean[l] = (float)(sum[l] / len);
     for (int c = 0; c < VL; c += W) {
         const vn mu = vld(mean + c);
-        for (int k = 0; k < padded; k++) {
-            float *dst = (k & 1 ? im : re) + (size_t)(k >> 1) * VL + c;
-            if (k >= len) {
-                vst(dst, VZERO);
-                continue;
-            }
+        vn prev = vld(frames + c) - mu; /* y[0] = x[0] - coef * x[0] */
+        int k = 0;
+        for (; k < len; k++) {
             const vn g = vld(frames + (size_t)k * VL + c) - mu;
-            const vn gp = vld(frames + (size_t)(k > 0 ? k - 1 : 0) * VL + c) - mu;
-            vst(dst, (g - coef * gp) * window[k]);
+            vst((k & 1 ? im : re) + (size_t)(k >> 1) * VL + c, (g - coef * prev) * window[k]);
+            prev = g;
         }
+        for (; k < padded; k++)
+            vst((k & 1 ? im : re) + (size_t)(k >> 1) * VL + c, VZERO);
     }
 }
 
@@ -527,10 +526,10 @@ static void kaldi_prep(const float *frames, int len, const float *window, float 
 /* Whisper normalization                                                              */
 /* ---------------------------------------------------------------------------------- */
 
-/* x = (max(x, max(x) - 8) + 4) / 4 over n finite floats. Max is order-independent, so the
- * vector reduction matches a sequential one exactly. */
-static void whisper_normalize(float *x, size_t n) {
-    float gmax = -3.402823466e+38f;
+/* max(init, x[0..n)) over finite floats. Max is order-independent, so the vector reduction
+ * matches a sequential one exactly. */
+static float max_f32(const float *x, size_t n, float init) {
+    float gmax = init;
     size_t i = 0;
 #if defined(AF_VEC_EXT)
     vn vmax = VZERO + gmax;
@@ -546,8 +545,13 @@ static void whisper_normalize(float *x, size_t n) {
 #endif
     for (; i < n; i++)
         gmax = x[i] > gmax ? x[i] : gmax;
+    return gmax;
+}
+
+/* x = (max(x, gmax - 8) + 4) / 4 over n floats. */
+static void whisper_normalize(float *x, size_t n, float gmax) {
     const float floor_v = gmax - 8.0f;
-    for (i = 0; i < n; i++)
+    for (size_t i = 0; i < n; i++)
         x[i] = ((x[i] > floor_v ? x[i] : floor_v) + 4.0f) * 0.25f;
 }
 
@@ -599,6 +603,6 @@ static void resample_run(const float *bank, int width, const float *x, int m, in
 }
 
 const af_kernels AF_CAT(af_kernels, AF_ISA) = {
-    AF_STR(AF_ISA), rfft_power, gather_packed,     gather_scaled, mel,          log10_floor,
-    log_floor,      kaldi_prep, whisper_normalize, resample_dot,  resample_run,
+    AF_STR(AF_ISA), rfft_power, gather_packed, gather_scaled,     mel,          log10_floor,
+    log_floor,      kaldi_prep, max_f32,       whisper_normalize, resample_dot, resample_run,
 };

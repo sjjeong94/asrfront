@@ -126,17 +126,21 @@ static void log_mel_virtual(af_whisper *h, const float *audio, size_t n_in, size
     const af_kernels *k = h->k;
     const size_t n_frames = n_virt / WHISPER_HOP;
     const int n_mels = h->cfg.n_mels;
+    /* Short inputs padded to 30 s (or to a long batch item): most blocks are silence, with a
+     * known output. They form one run of frames [s0, s1) (frames_silent() holds from some
+     * block on, until the reflection at the end reaches back into the input; a silent block
+     * that would not extend the run is simply computed), written once, already normalized,
+     * after the max is known. */
+    size_t s0 = n_frames, s1 = n_frames;
+    float gmax = -3.402823466e+38f;
 
     for (size_t t0 = 0; t0 < n_frames; t0 += AF_VL) {
         const int count = n_frames - t0 < AF_VL ? (int)(n_frames - t0) : AF_VL;
-        /* Short inputs padded to 30 s (or to a long batch item): most blocks are silence,
-         * with a known output. */
-        if (n_in < n_virt && frames_silent(n_in, n_virt, t0, t0 + (size_t)count - 1)) {
-            for (int m = 0; m < n_mels; m++) {
-                float *dst = out + (size_t)m * n_frames + t0;
-                for (int l = 0; l < count; l++)
-                    dst[l] = h->silence;
-            }
+        if (n_in < n_virt && (s0 == n_frames || s1 == t0) &&
+            frames_silent(n_in, n_virt, t0, t0 + (size_t)count - 1)) {
+            if (s0 == n_frames)
+                s0 = t0;
+            s1 = t0 + (size_t)count;
             continue;
         }
         const float *src[AF_VL];
@@ -147,6 +151,8 @@ static void log_mel_virtual(af_whisper *h, const float *audio, size_t n_in, size
         k->rfft_power(h->fft, h->re, h->im, h->scr_re, h->scr_im, h->power);
         k->mel(h->mel, h->power, h->melv);
         k->log10_floor(h->melv, (size_t)n_mels * AF_VL, 1e-10f);
+        /* Unused lanes hold copies of lane 0, so they do not change the max. */
+        gmax = k->max(h->melv, (size_t)n_mels * AF_VL, gmax);
         for (int m = 0; m < n_mels; m++) { /* SoA rows map to contiguous output runs */
             float *dst = out + (size_t)m * n_frames + t0;
             const float *row = h->melv + (size_t)m * AF_VL;
@@ -156,7 +162,20 @@ static void log_mel_virtual(af_whisper *h, const float *audio, size_t n_in, size
     }
 
     /* Dynamic range compression against the global max, then scale. */
-    k->whisper_normalize(out, (size_t)n_mels * n_frames);
+    if (s0 == n_frames) {
+        k->whisper_normalize(out, (size_t)n_mels * n_frames, gmax);
+        return;
+    }
+    gmax = h->silence > gmax ? h->silence : gmax;
+    float silence = h->silence; /* normalized by the same kernel as the computed frames */
+    k->whisper_normalize(&silence, 1, gmax);
+    for (int m = 0; m < n_mels; m++) {
+        float *row = out + (size_t)m * n_frames;
+        k->whisper_normalize(row, s0, gmax);
+        for (size_t t = s0; t < s1; t++)
+            row[t] = silence;
+        k->whisper_normalize(row + s1, n_frames - s1, gmax);
+    }
 }
 
 int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, float *out) {

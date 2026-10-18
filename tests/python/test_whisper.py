@@ -58,6 +58,20 @@ def test_log_mel_matches_whisper_torch(sigs, name, pad_or_trim):
     assert_close(actual, expected, ATOL, name)
 
 
+@pytest.mark.parametrize("n", [0, 1, 201, 16000, 16160, 479800, 479999, 480000])
+def test_skipped_silence_matches_computed(n):
+    """Frames that only see zero padding are written, already normalized, without computing
+    them: exactly what computing them over explicit zeros gives."""
+    audio = np.random.default_rng(n).standard_normal(n).astype(np.float32) * 0.1
+    full = _ext.WhisperFrontend(pad_or_trim=False)
+    expected = full.log_mel(np.pad(audio, (0, ref.WHISPER_N_SAMPLES - n)))
+    np.testing.assert_array_equal(_ext.WhisperFrontend().log_mel(audio), expected)
+    if n > ref.WHISPER_N_FFT // 2:
+        for extra in (1, 7, 160, 333, 5000):  # the end reflection reaches back into the input
+            padded = full.log_mel_padded(audio, n + extra)
+            np.testing.assert_array_equal(padded, full.log_mel(np.pad(audio, (0, extra))))
+
+
 def test_default_shape(sigs):
     assert asrfront.whisper.log_mel(sigs["speech"]).shape == (80, 3000)
     assert asrfront.whisper.log_mel(sigs["speech"], n_mels=128).shape == (128, 3000)

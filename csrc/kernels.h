@@ -48,8 +48,11 @@ typedef struct af_kernels {
     void (*kaldi_prep)(const float *frames, int len, const float *window, float coef, int padded,
                        float *re, float *im);
 
-    /* Whisper dynamic range + scale: x = (max(x, max(x) - 8) + 4) / 4, in place. */
-    void (*whisper_normalize)(float *x, size_t n);
+    /* max(init, x[0], ..., x[n - 1]) over finite floats (order-independent). */
+    float (*max)(const float *x, size_t n, float init);
+    /* Whisper dynamic range + scale against the global max gmax: x = (max(x, gmax - 8) + 4) / 4,
+     * in place. */
+    void (*whisper_normalize)(float *x, size_t n, float gmax);
 
     /* Resampler float path: sum h[i] * x[i] over i < width (a multiple of 8) with 8 FMA
      * accumulators and a fixed reduction tree (docs/load.md). The only kernel that uses FMA,

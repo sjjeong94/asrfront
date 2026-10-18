@@ -198,7 +198,8 @@ All steps above run in one pass over the frames in `csrc/whisper.c`, 8 frames at
    applies the Hann window (`gather_packed`). With `pad_or_trim`, blocks that start past the
    input read only zero padding (the reflection at the 30 s end stays inside it too): their
    output is the constant `log10_floor(0)`, computed once with the same kernel when the
-   handle is created, so these blocks skip steps 1–4 and match computed ones bit for bit.
+   handle is created, so these blocks skip steps 1–5 and match computed ones bit for bit:
+   they are written once, already normalized, at the end of step 6.
 2. **FFT** — the 400-point real FFT is computed as a 200-point complex FFT of
    `z[i] = x[2i] + i·x[2i+1]` (Stockham autosort, radix 4·2·5·5), followed by the standard
    split step that recovers the 201 real-FFT bins; `|X|²` is fused into that step.
@@ -206,8 +207,10 @@ All steps above run in one pass over the frames in `csrc/whisper.c`, 8 frames at
 3. **Mel** — sparse filter ranges, accumulated per lane.
 4. **log10** — a vectorized Cephes `logf` polynomial (≈ 1 ulp) times `log10(e)`, with the
    1e-10 floor; values are written transposed into the `(n_mels, T)` output.
-5. **Normalize** — one vectorized pass finds the global max, a second applies
-   `(max(x, max − 8) + 4) / 4` in place.
+5. **Max** — the running global max is updated from each block while it is still in cache
+   (max is order-independent, so this equals one pass over the output).
+6. **Normalize** — one pass applies `(max(x, max − 8) + 4) / 4` in place over the computed
+   frames; the silent run gets the normalized silence value directly.
 
 There is no FMA and no reassociation, so the AVX2, baseline (SSE2/NEON) and plain-C kernel
 builds produce bit-identical output.
