@@ -78,6 +78,8 @@ def _frontend(
     n_mels: int, lfr_m: int, lfr_n: int, cmvn: Cmvn | None, dither: float, seed: int
 ) -> _ext.SenseVoiceFrontend:
     """``cmvn`` must already be resolved by :func:`_resolve_cmvn`."""
+    if dither == 0.0:
+        seed = 0  # the RNG is unused: one cached handle for every seed
     shift, scale = cmvn if cmvn is not None else (None, None)
     cmvn_key = None if cmvn is None else (cmvn[0].tobytes(), cmvn[1].tobytes())
     return cached_frontend(

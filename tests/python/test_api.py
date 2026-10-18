@@ -216,3 +216,106 @@ def test_fbank_batch_with_path_and_empty(sigs, tmp_path):
     np.testing.assert_array_equal(feats[0], fbank(sigs["speech"], cmvn=path))
     feats, lengths = fbank_batch([])
     assert feats.shape == (0, 0, 560) and lengths.shape == (0,)
+
+
+# ---------------------------------------------------------------------------------------------
+# Worker pool and handle cache (asrfront._audio)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_batch_reuses_pool_and_handles(sigs):
+    from asrfront import _audio
+
+    audios = [sigs["speech"]] * 4
+    log_mel_batch(audios, n_threads=2)
+    pool = _audio._pool
+    log_mel_batch(audios, n_threads=2)
+    assert _audio._pool is pool  # no new threads per call
+    more = pool._max_workers + 1
+    log_mel_batch([sigs["speech"]] * more, n_threads=more)  # grows on demand
+    assert _audio._pool is not pool and _audio._pool._max_workers > pool._max_workers
+
+
+def test_run_parallel_limits_concurrency_and_raises():
+    import threading
+    import time
+
+    from asrfront._audio import run_parallel
+
+    active, peak, lock = [0], [0], threading.Lock()
+
+    def work(i):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.002)
+        with lock:
+            active[0] -= 1
+
+    run_parallel(work, 40, 3)
+    assert peak[0] <= 3
+
+    done = []
+
+    def fail(i):
+        if i == 5:
+            raise RuntimeError("boom")
+        done.append(i)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run_parallel(fail, 1000, 4)
+    assert len(done) < 999  # the other workers stopped taking items
+
+
+def test_run_parallel_nested_does_not_deadlock(sigs):
+    from asrfront._audio import run_parallel
+
+    outs = [None] * 8
+    audio = sigs["speech"]
+
+    def work(i):  # a batch call from inside a pool worker runs inline
+        outs[i] = log_mel_batch([audio, audio], n_threads=2)
+
+    run_parallel(work, len(outs), 8)
+    for o in outs:
+        np.testing.assert_array_equal(o[0], log_mel(audio))
+
+
+def test_handle_cache_is_bounded(sigs):
+    from asrfront import _audio
+
+    audio = sigs["speech"][:16000]
+    first = fbank(audio, dither=1.0, seed=0)
+    for seed in range(3 * _audio._CACHE_SIZE):
+        fbank(audio, dither=1.0, seed=seed)
+    assert len(_audio._local.cache) <= _audio._CACHE_SIZE
+    # seed 0's handle was evicted; the rebuilt one gives the same result
+    np.testing.assert_array_equal(fbank(audio, dither=1.0, seed=0), first)
+
+
+def test_seed_ignored_without_dither(sigs):
+    from asrfront import _audio
+
+    audio = sigs["speech"][:16000]
+    fbank(audio, seed=1)
+    n = len(_audio._local.cache)
+    np.testing.assert_array_equal(fbank(audio, seed=2), fbank(audio, seed=1))
+    assert len(_audio._local.cache) == n  # one handle for every seed
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fork"), reason="needs fork")
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_batch_after_fork(sigs):
+    import os
+
+    log_mel_batch([sigs["speech"]] * 2, n_threads=2)  # parent pool exists
+    pid = os.fork()
+    if pid == 0:  # child: the parent's pool threads are gone; a new pool must be used
+        try:
+            out = log_mel_batch([sigs["speech"]] * 2, n_threads=2)
+            ok = np.array_equal(out[0], log_mel(sigs["speech"]))
+        except BaseException:
+            ok = False
+        os._exit(0 if ok else 1)
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0

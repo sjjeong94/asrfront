@@ -68,9 +68,15 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
   argument writes straight into a caller buffer, which the batch functions use to avoid copies.
 - **The GIL is released** during every native call, so Python threads run in parallel.
 - **Per-thread handle cache** (`threading.local`), keyed on the configuration, since handles are
-  not thread-safe.
+  not thread-safe. It is a small LRU (8 handles per thread), so callers that vary the
+  configuration (e.g. a dither seed per call) do not accumulate handles; the seed is left out
+  of the key when dither is 0.
 - **Batch parallelism in Python**: `*_batch` functions run items on a thread pool. This is simpler
-  and scales better than splitting one input across threads in C.
+  and scales better than splitting one input across threads in C. The pool is shared and
+  persistent (created on first use, grown for a larger `n_threads`, reset after `fork`), so a
+  batch call neither starts threads nor rebuilds the workers' cached handles; starting a pool
+  per call cost more than the work for small batches. A batch call from inside a worker runs
+  inline instead of waiting on the pool.
 
 ## Audio loading (`asrfront.load`)
 
