@@ -48,8 +48,9 @@ typedef struct af_kernels {
     void (*kaldi_prep)(const float *frames, int len, const float *window, float coef, int padded,
                        float *re, float *im);
 
-    /* max(init, x[0], ..., x[n - 1]) over finite floats (order-independent). */
-    float (*max)(const float *x, size_t n, float init);
+    /* max(init, x[0], ..., x[n - 1]) over finite floats (order-independent). Not named max:
+     * MSVC's <stdlib.h> defines a max(a, b) macro in C. */
+    float (*max_f32)(const float *x, size_t n, float init);
     /* Whisper dynamic range + scale against the global max gmax: x = (max(x, gmax - 8) + 4) / 4,
      * in place. */
     void (*whisper_normalize)(float *x, size_t n, float gmax);

@@ -72,7 +72,8 @@ def convert_audio(a: np.ndarray, name: str = "audio") -> np.ndarray:
     float32 and the NaN / inf check (a pass over the samples)."""
     if a.dtype.kind == "i":  # int16 in either byte order
         # one pass; the same values as astype(float32) / 32768 (a power of two)
-        return np.multiply(a, np.float32(1.0 / 32768.0), dtype=np.float32)
+        pcm: np.ndarray = np.multiply(a, np.float32(1.0 / 32768.0), dtype=np.float32)
+        return pcm
     with np.errstate(over="ignore"):  # out-of-range values become inf, rejected below
         out = np.ascontiguousarray(a, dtype=np.float32)
     if not np.isfinite(out).all():
