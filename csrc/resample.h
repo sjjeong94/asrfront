@@ -15,6 +15,12 @@ typedef struct af_resampler af_resampler;
 int af_resampler_create(int sr_in, int sr_out, af_resampler **out);
 void af_resampler_destroy(af_resampler *r);
 
+/* The same, shared through a small process-wide cache (a resampler is read-only once
+ * created, so one serves any number of threads): repeated loads at a rate skip building
+ * the filter bank. Thread-safe. Release with af_resampler_release(), never destroy. */
+int af_resampler_acquire(int sr_in, int sr_out, af_resampler **out);
+void af_resampler_release(af_resampler *r);
+
 int af_resampler_taps(const af_resampler *r);   /* N */
 int af_resampler_phases(const af_resampler *r); /* filters in the bank, excluding the extra one */
 int af_resampler_exact(const af_resampler *r);  /* 1: exact rational phases */

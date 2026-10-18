@@ -138,6 +138,21 @@ def test_concurrent_threads(tmp_path):
             np.testing.assert_array_equal(got, want)
 
 
+def test_concurrent_threads_resampled(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    # more rates than the resampler cache holds, so entries are evicted and recreated while
+    # other threads use them; the interpolated 44056 Hz bank is never cached
+    rates = [8000, 11025, 22050, 32000, 44100, 48000, 44056]
+    paths = [
+        write_wav(tmp_path / f"{sr}.wav", noise_s16(sr // 2, 2, seed=sr), sr=sr) for sr in rates
+    ]
+    expected = [asrfront.load(p) for p in paths]
+    with ThreadPoolExecutor(8) as ex:
+        for got, want in zip(ex.map(asrfront.load, paths * 6), expected * 6):
+            np.testing.assert_array_equal(got, want)
+
+
 # ---------------------------------------------------------------------------------------------
 # Against ffmpeg (whisper's load_audio command line)
 # ---------------------------------------------------------------------------------------------

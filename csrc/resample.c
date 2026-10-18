@@ -5,6 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
 #include "asrfront.h"
 #include "kernels.h"
 #include "resample.h"
@@ -30,6 +36,10 @@ struct af_resampler {
     float *bankf;           /* (phases + 1) x width, zero padded */
     int32_t *bankq;         /* (phases + 1) x n_taps, Q15 */
     const af_kernels *kern; /* float path kernels */
+    /* af_resampler_acquire(): users, and whether the cache holds it (both under cache_lock) */
+    unsigned refs;
+    int cached;
+    unsigned long long used; /* LRU stamp */
 };
 
 static uint64_t gcd_u64(uint64_t a, uint64_t b) {
@@ -144,6 +154,120 @@ void af_resampler_destroy(af_resampler *r) {
     free(r->bankf);
     free(r->bankq);
     free(r);
+}
+
+/* ---------------------------------------------------------------------------------- */
+/* Shared resamplers (af_resampler_acquire)                                           */
+/* ---------------------------------------------------------------------------------- */
+
+/* Creating the bank costs ~0.5 ms at 44.1 kHz (160 phases), more than resampling a 2 s
+ * clip, so loads keep a few resamplers. Bounded: CACHE_SLOTS entries of at most
+ * CACHE_MAX_BYTES of filter bank each; larger banks (interpolated mode at high rates,
+ * up to ~13 MB) are created per call. */
+#define CACHE_SLOTS 4
+#define CACHE_MAX_BYTES ((size_t)1 << 20)
+
+static af_resampler *cache[CACHE_SLOTS];
+static unsigned long long cache_clock;
+
+#ifdef _WIN32
+static SRWLOCK cache_lock = SRWLOCK_INIT;
+static void cache_init(void) {}
+static void lock(void) {
+    AcquireSRWLockExclusive(&cache_lock);
+}
+static void unlock(void) {
+    ReleaseSRWLockExclusive(&cache_lock);
+}
+#else
+static pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t cache_once = PTHREAD_ONCE_INIT;
+static void lock(void) {
+    pthread_mutex_lock(&cache_lock);
+}
+static void unlock(void) {
+    pthread_mutex_unlock(&cache_lock);
+}
+/* Held across fork(), so that a child never inherits it locked by a thread it does not have.
+ * The forking thread owns it on both sides and unlocks it in each. */
+static void register_fork_handlers(void) {
+    pthread_atfork(lock, unlock, unlock);
+}
+static void cache_init(void) {
+    pthread_once(&cache_once, register_fork_handlers);
+}
+#endif
+
+static size_t bank_bytes(const af_resampler *r) {
+    return ((size_t)r->phases + 1) * ((size_t)r->n_taps * (sizeof(double) + sizeof(int32_t)) +
+                                      (size_t)r->width * sizeof(float));
+}
+
+/* Under cache_lock: the cached resampler for these rates, marked as used once more. */
+static af_resampler *cache_take(int sr_in, int sr_out) {
+    for (int i = 0; i < CACHE_SLOTS; i++) {
+        af_resampler *r = cache[i];
+        if (r && r->sr_in == sr_in && r->sr_out == sr_out) {
+            r->refs++;
+            r->used = ++cache_clock;
+            return r;
+        }
+    }
+    return NULL;
+}
+
+int af_resampler_acquire(int sr_in, int sr_out, af_resampler **out) {
+    if (!out)
+        return AF_EINVAL;
+    *out = NULL;
+    cache_init();
+    lock();
+    af_resampler *r = cache_take(sr_in, sr_out);
+    unlock();
+    if (r) {
+        *out = r;
+        return AF_OK;
+    }
+    int rc = af_resampler_create(sr_in, sr_out, &r); /* outside the lock: slow */
+    if (rc != AF_OK)
+        return rc;
+    r->refs = 1;
+    af_resampler *evicted = NULL;
+    if (bank_bytes(r) <= CACHE_MAX_BYTES) {
+        lock();
+        af_resampler *other = cache_take(sr_in, sr_out); /* created meanwhile by another thread */
+        if (other) {
+            unlock();
+            af_resampler_destroy(r);
+            *out = other;
+            return AF_OK;
+        }
+        int slot = -1; /* an empty slot, else the least recently used idle entry */
+        for (int i = 0; i < CACHE_SLOTS && (slot < 0 || cache[slot]); i++)
+            if (!cache[i] ||
+                (cache[i]->refs == 0 && (slot < 0 || cache[i]->used < cache[slot]->used)))
+                slot = i;
+        if (slot >= 0) { /* else every entry is in use: r stays private */
+            evicted = cache[slot];
+            cache[slot] = r;
+            r->cached = 1;
+            r->used = ++cache_clock;
+        }
+        unlock();
+    }
+    af_resampler_destroy(evicted); /* idle, and no longer reachable through the cache */
+    *out = r;
+    return AF_OK;
+}
+
+void af_resampler_release(af_resampler *r) {
+    if (!r)
+        return;
+    lock();
+    const int last = --r->refs == 0 && !r->cached;
+    unlock();
+    if (last)
+        af_resampler_destroy(r);
 }
 
 int af_resampler_taps(const af_resampler *r) {

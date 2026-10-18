@@ -52,7 +52,8 @@ def as_audio(audio: Any, name: str = "audio") -> np.ndarray:
         raise ValueError(f"{name} must be a 1-D mono waveform, got shape {a.shape}{hint}")
     kind = a.dtype.kind
     if a.dtype == np.int16:
-        return a.astype(np.float32) / np.float32(32768.0)
+        # one pass; the same values as astype(float32) / 32768 (a power of two)
+        return np.multiply(a, np.float32(1.0 / 32768.0), dtype=np.float32)
     if kind == "f":
         with np.errstate(over="ignore"):  # out-of-range values become inf, rejected below
             out = np.ascontiguousarray(a, dtype=np.float32)

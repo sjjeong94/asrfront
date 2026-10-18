@@ -6,6 +6,7 @@
 
 #include "asrfront.h"
 #include "audio.h"
+#include "resample.h"
 
 static int failures = 0;
 
@@ -526,6 +527,45 @@ static void test_file(void) {
     CHECK(af_load_file(NULL, &a, &n) == AF_EINVAL);
 }
 
+static void test_resampler_cache(void) {
+    /* Reused while cached; private when every slot is in use or the bank is too large. */
+    af_resampler *a = NULL, *b = NULL;
+    CHECK(af_resampler_acquire(44100, 16000, &a) == AF_OK && a);
+    CHECK(af_resampler_acquire(44100, 16000, &b) == AF_OK && b == a);
+    af_resampler_release(b);
+    af_resampler_release(a);
+    CHECK(af_resampler_acquire(44100, 16000, &b) == AF_OK && b == a); /* idle, still cached */
+    af_resampler_release(b);
+
+    const int busy_rates[4] = {11025, 22050, 32000, 48000};
+    af_resampler *busy[4];
+    for (int i = 0; i < 4; i++)
+        CHECK(af_resampler_acquire(busy_rates[i], 16000, &busy[i]) == AF_OK);
+    CHECK(af_resampler_acquire(44100, 16000, &a) == AF_OK); /* evicted: all slots busy */
+    CHECK(af_resampler_acquire(44100, 16000, &b) == AF_OK && b != a);
+    CHECK(af_resampler_taps(a) == 92 && af_resampler_taps(b) == 92);
+    af_resampler_release(a);
+    af_resampler_release(b);
+    af_resampler *again = NULL;
+    CHECK(af_resampler_acquire(48000, 16000, &again) == AF_OK && again == busy[3]);
+    af_resampler_release(again);
+    for (int i = 0; i < 4; i++)
+        af_resampler_release(busy[i]);
+    CHECK(af_resampler_acquire(44100, 16000, &a) == AF_OK); /* evicts an idle entry */
+    CHECK(af_resampler_acquire(44100, 16000, &b) == AF_OK && b == a);
+    af_resampler_release(a);
+    af_resampler_release(b);
+
+    /* interpolated mode at 383999 Hz: ~13 MB of filters, never cached */
+    CHECK(af_resampler_acquire(383999, 16000, &a) == AF_OK && !af_resampler_exact(a));
+    CHECK(af_resampler_acquire(383999, 16000, &b) == AF_OK && b != a);
+    af_resampler_release(a);
+    af_resampler_release(b);
+
+    CHECK(af_resampler_acquire(999, 16000, &a) == AF_EUNSUPPORTED && a == NULL);
+    CHECK(af_resampler_acquire(44100, 16000, NULL) == AF_EINVAL);
+}
+
 int main(void) {
     test_wav_s16();
     test_wav_formats();
@@ -539,6 +579,7 @@ int main(void) {
     test_adpcm();
     test_coreaudio_layouts();
     test_file();
+    test_resampler_cache();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

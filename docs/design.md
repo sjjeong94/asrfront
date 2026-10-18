@@ -97,6 +97,10 @@ Options can be added later without breaking `load(source)`.
   `af_load_memory`, so paths and bytes share one code path and path encoding is not an issue.
 - The resampler and downmix are internal (`csrc/resample.h`, `csrc/remix.c`), one-shot over the
   whole file. Tests reach them through `_ext` test hooks.
+- Resamplers are read-only once built, so `load` shares them through a small process-wide
+  cache (4 entries of ≤ 1 MiB, LRU among idle entries, reference-counted, mutex-protected):
+  building the 44.1 kHz bank (160 phases of Kaiser-windowed sinc) cost ~0.5 ms, about 70 % of
+  loading a 2 s clip. This is the only shared state in the C core.
 - Untrusted input: malformed files must fail cleanly (bounds checks on every header field, no
   allocation sized from an unvalidated header, fuzzing in CI). The decoded size, however, can be
   far larger than the file; `load` has no limit option, and callers that accept uploads bound

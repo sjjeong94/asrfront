@@ -379,6 +379,11 @@ the only amplification. ffmpeg has the same property. Callers that load untruste
 should bound what they accept, e.g. the upload size (with FLAC in mind), or the duration read
 from the header before calling `load`. There is deliberately no limit option in `load` itself.
 
+Besides that, the process keeps up to 4 resamplers for the rates it loaded most recently
+(each with at most 1 MiB of filters; larger banks, i.e. interpolated mode at high rates, are
+built per call), since building a bank takes ~0.5 ms at 44.1 kHz, more than resampling a
+2 s clip.
+
 ## SenseVoice (FunASR) loading
 
 FunASR does not use ffmpeg for local files: `load_audio_text_image_video` reads with

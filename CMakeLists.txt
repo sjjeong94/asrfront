@@ -126,6 +126,10 @@ if(ASRFRONT_HAVE_AVX2)
 endif()
 if(UNIX)
   target_link_libraries(asrfront_core PUBLIC m)
+  # pthread_mutex / pthread_atfork (resampler cache); a separate library before glibc 2.34
+  set(THREADS_PREFER_PTHREAD_FLAG ON)
+  find_package(Threads REQUIRED)
+  target_link_libraries(asrfront_core PUBLIC Threads::Threads)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -341,7 +341,7 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
         *n_out = n;
         return AF_OK;
     }
-    if (resample && (rc = af_resampler_create(d->sample_rate, sr_out, &rs)) != AF_OK)
+    if (resample && (rc = af_resampler_acquire(d->sample_rate, sr_out, &rs)) != AF_OK)
         return rc;
     size_t m = resample ? af_resampler_out_len(rs, n) : n;
     const size_t es = elem_size[path];
@@ -357,7 +357,7 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
         } else {
             free(res);
         }
-        af_resampler_destroy(rs);
+        af_resampler_release(rs);
         return rc;
     }
 
@@ -394,6 +394,6 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
     for (int c = 0; c < ch; c++)
         free(chan[c]);
     free(tmp);
-    af_resampler_destroy(rs);
+    af_resampler_release(rs);
     return rc;
 }
