@@ -102,6 +102,23 @@ def test_rejects_other_dtypes(fn, dtype):
         fn(np.zeros(16000, dtype))
 
 
+@pytest.mark.parametrize("fn", [log_mel, fbank, fbank_raw])
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf, 1e40])  # 1e40: inf as float32
+def test_rejects_non_finite(fn, value):
+    audio = np.zeros(16000)
+    audio[1234] = value
+    with pytest.raises(ValueError, match="NaN or inf.*index 1234"):
+        fn(audio)
+
+
+def test_batch_rejects_non_finite():
+    items = [np.zeros(16000, np.float32), np.full(16000, np.nan, np.float32)]
+    with pytest.raises(ValueError, match=r"audios\[1\] contains NaN or inf"):
+        log_mel_batch(items)
+    with pytest.raises(ValueError, match=r"audios\[1\] contains NaN or inf"):
+        fbank_batch(items)
+
+
 @pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
 def test_float_dtypes(sigs, dtype):
     audio = sigs["speech"].astype(dtype)
@@ -265,6 +282,33 @@ def test_run_parallel_limits_concurrency_and_raises():
     with pytest.raises(RuntimeError, match="boom"):
         run_parallel(fail, 1000, 4)
     assert len(done) < 999  # the other workers stopped taking items
+
+
+def test_run_parallel_stops_on_interrupt(monkeypatch):
+    import time
+
+    from asrfront import _audio
+
+    def interrupted_wait(fs):
+        time.sleep(0.02)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_audio, "wait", interrupted_wait)
+    done = []
+
+    def work(i):
+        time.sleep(0.002)
+        done.append(i)
+
+    with pytest.raises(KeyboardInterrupt):
+        _audio.run_parallel(work, 1000, 4)
+    # the workers finish their current item and stop; without the stop, all 1000 items
+    # would be done within ~0.5 s
+    time.sleep(1.0)
+    n = len(done)
+    assert n < 1000
+    time.sleep(0.1)
+    assert len(done) == n
 
 
 def test_run_parallel_nested_does_not_deadlock(sigs):

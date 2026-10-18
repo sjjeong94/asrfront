@@ -244,6 +244,7 @@ random numbers.
 | < 400 samples | 0 raw frames, LFR fails | `(0, 560)` (`fbank_raw`: `(0, 80)`) |
 | 400 samples | 1 raw frame → 1 LFR frame (frame 0 × 7) | same |
 | tail < 160 samples | dropped (`snip_edges`) | same |
+| NaN / inf samples | NaN in the frames containing them | `ValueError` |
 | int16 PCM | caller converts | divided by 32768, then ×32768 again (exact) |
 | batch | `pad_sequence` with 0, plus lengths | `fbank_batch` → `(feats, lengths)`, zero-padded |
 

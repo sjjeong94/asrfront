@@ -184,6 +184,7 @@ turns the 3000 frames into 1500 positions (20 ms each).
 | empty, `pad_or_trim=True` | 30 s of zeros → all −1.5 | same |
 | ≤ 200 samples, `pad_or_trim=False` | reflect-pad error | `ValueError` |
 | > 30 s, `pad_or_trim=True` | first 30 s | same |
+| NaN / inf samples | NaN everywhere (via the global max) | `ValueError` |
 | int16 PCM | caller divides by 32768 (`load_audio`) | divided by 32768 automatically |
 | stereo / other rates | must be converted by the caller (ffmpeg in `load_audio`) | `ValueError` for 2-D input; no resampling |
 

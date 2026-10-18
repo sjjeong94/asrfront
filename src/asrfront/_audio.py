@@ -38,6 +38,8 @@ def as_audio(audio: Any, name: str = "audio") -> np.ndarray:
 
     Accepts anything ``np.asarray`` understands (lists, numpy arrays, CPU torch tensors).
     int16 is treated as PCM and scaled by 1/32768; float dtypes are cast to float32.
+    NaN / inf (also float64 values beyond the float32 range) raise ValueError: the native
+    frontends would silently turn them into finite, meaningless features.
     """
     a = np.asarray(audio)
     if a.ndim != 1:
@@ -52,7 +54,15 @@ def as_audio(audio: Any, name: str = "audio") -> np.ndarray:
     if a.dtype == np.int16:
         return a.astype(np.float32) / np.float32(32768.0)
     if kind == "f":
-        return np.ascontiguousarray(a, dtype=np.float32)
+        with np.errstate(over="ignore"):  # out-of-range values become inf, rejected below
+            out = np.ascontiguousarray(a, dtype=np.float32)
+        if not np.isfinite(out).all():
+            bad = int(np.flatnonzero(~np.isfinite(out))[0])
+            raise ValueError(
+                f"{name} contains NaN or inf (first at index {bad}, value {a[bad]!r}); "
+                "only finite samples are supported"
+            )
+        return out
     if kind in "iu":
         raise TypeError(
             f"{name} has integer dtype {a.dtype}; only int16 PCM is scaled automatically. "
@@ -145,7 +155,11 @@ def run_parallel(fn: Callable[[int], None], n_items: int, n_threads: int | None)
 
     ex = _executor(workers)
     futures: list[Future[None]] = [ex.submit(drain) for _ in range(workers)]
-    wait(futures)  # all done before returning: workers write into caller-visible buffers
+    try:
+        wait(futures)  # all done before returning: workers write into caller-visible buffers
+    except BaseException:  # e.g. KeyboardInterrupt: do not finish the batch in the background
+        failed.set()
+        raise
     for f in futures:
         f.result()  # re-raises the first worker exception
 

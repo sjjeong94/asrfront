@@ -66,7 +66,7 @@ def log_mel(audio: Any, n_mels: int = 80, pad_or_trim: bool = True) -> np.ndarra
         ``pad_or_trim``, otherwise ``len(audio) // 160``.
 
     Raises:
-        ValueError: ``audio`` is not 1-D, ``n_mels`` is unsupported, or
+        ValueError: ``audio`` is not 1-D or contains NaN / inf, ``n_mels`` is unsupported, or
             ``pad_or_trim=False`` and ``audio`` has at most 200 samples (the reflect
             padding of the centered STFT needs more; whisper/torch fail too).
         TypeError: ``audio`` has an unsupported dtype (e.g. int32, complex).
