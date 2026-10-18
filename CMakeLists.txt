@@ -143,7 +143,11 @@ if(ASRFRONT_BUILD_PYTHON)
   find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module
                ${SKBUILD_SABI_COMPONENT})
   find_package(nanobind CONFIG REQUIRED)
-  nanobind_add_module(_ext STABLE_ABI NB_STATIC src/asrfront/_ext.cpp)
+  # FREE_THREADED: the module keeps free-threaded CPython (3.14t) without a GIL. The C core is
+  # already run concurrently (every call releases the GIL), and its one shared state, the
+  # resampler cache, has a lock; handles stay one per thread. Ignored by other builds, as
+  # STABLE_ABI is by free-threaded ones.
+  nanobind_add_module(_ext STABLE_ABI FREE_THREADED NB_STATIC src/asrfront/_ext.cpp)
   target_include_directories(_ext PRIVATE csrc)  # internal headers (test hooks)
   target_link_libraries(_ext PRIVATE asrfront_core)
   install(TARGETS _ext LIBRARY DESTINATION asrfront)

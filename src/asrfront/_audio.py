@@ -162,7 +162,15 @@ def run_parallel(fn: Callable[[int], None], n_items: int, n_threads: int | None)
     own = _new_executor(workers) if workers > _available_cores() else None
     ex = own or _executor(workers)
     try:
-        futures: list[Future[None]] = [ex.submit(drain) for _ in range(workers)]
+        futures: list[Future[None]] = []
+        try:
+            for _ in range(workers):
+                futures.append(ex.submit(drain))
+        except RuntimeError:
+            # No new work at interpreter shutdown (e.g. from an atexit handler), or no thread
+            # could be started: take the items here. drain() shares the iterator with any
+            # task already submitted.
+            drain()
         try:
             wait(futures)  # all done before returning: workers write into caller-visible buffers
         except BaseException:  # e.g. KeyboardInterrupt: do not finish the batch in the background

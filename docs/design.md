@@ -75,6 +75,11 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
 - **Zero-copy output**: the C buffer is handed to NumPy through a capsule. The low-level `out=`
   argument writes straight into a caller buffer, which the batch functions use to avoid copies.
 - **The GIL is released** during every native call, so Python threads run in parallel.
+- **Free-threaded CPython** (3.14t): the module declares `FREE_THREADED`, so importing it
+  keeps the GIL disabled. Nothing else had to change: the C core already runs concurrently
+  (GIL released), its only shared state (the resampler cache) has a lock, and the Python
+  side keeps its shared state (pool, handle caches) behind a lock or in thread-local storage.
+  Handles stay one per thread.
 - **Per-thread handle cache** (`threading.local`), keyed on the configuration, since handles are
   not thread-safe. It is a small LRU (8 handles per thread), so callers that vary the
   configuration (e.g. a dither seed per call) do not accumulate handles; the seed is left out

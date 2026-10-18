@@ -333,6 +333,51 @@ def test_run_parallel_stops_on_interrupt(monkeypatch):
     assert len(done) == n
 
 
+def test_free_threaded_build_keeps_the_gil_disabled():
+    import os
+    import subprocess
+    import sys
+    import sysconfig
+
+    if not sysconfig.get_config_var("Py_GIL_DISABLED"):
+        pytest.skip("not a free-threaded CPython")
+    env = {k: v for k, v in os.environ.items() if k != "PYTHON_GIL"}
+    code = "import sys, asrfront; assert not sys._is_gil_enabled()"
+    r = subprocess.run(
+        [sys.executable, "-W", "error::RuntimeWarning", "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_batch_at_interpreter_shutdown(warm):
+    # concurrent.futures refuses new work before atexit handlers run: items run inline.
+    import subprocess
+    import sys
+
+    code = f"""
+import atexit
+import numpy as np
+from asrfront import sensevoice, whisper
+x = np.random.default_rng(0).standard_normal(16000).astype(np.float32) * 0.1
+if {warm}:
+    whisper.log_mel_batch([x] * 4, n_threads=4)
+def at_exit():
+    out = whisper.log_mel_batch([x] * 8, n_threads=4)
+    assert np.array_equal(out[7], whisper.log_mel(x))
+    feats, _ = sensevoice.fbank_batch([x] * 8, n_threads=64)  # own pool, also refused
+    assert np.array_equal(feats[7], sensevoice.fbank(x))
+    print("ok")
+atexit.register(at_exit)
+"""
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
 def test_run_parallel_nested_does_not_deadlock(sigs):
     from asrfront._audio import run_parallel
 

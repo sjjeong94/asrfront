@@ -72,8 +72,11 @@ input = "csrc/include/asrfront.h"
 regex = '#define ASRFRONT_VERSION "(?P<value>[^"]+)"'
 
 [tool.cibuildwheel]
-# cp39-cp311 regular wheels + cp312 abi3 (also used for 3.13+, tested via test-skip below).
-build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*"]
+# cp39-cp311 regular wheels, one cp312 abi3 wheel for 3.12+, and a free-threaded cp314t
+# wheel (free-threaded builds cannot use abi3). For cp313 / cp314 cibuildwheel finds the abi3
+# wheel already built and only runs the tests with it. cibuildwheel 3.x knows no cp315 yet;
+# 3.15 is tested in CI (ci.yml) with the abi3 wheel's source.
+build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*", "cp313-*", "cp314-*", "cp314t-*"]
 skip = ["*-win32", "*_i686", "*-musllinux_*"]
 build-frontend = "build[uv]"
 test-requires = ["pytest"]

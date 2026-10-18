@@ -25,7 +25,8 @@ pip install asrfront
 ```
 
 Wheels: Linux (x86_64, aarch64), macOS (arm64, x86_64), Windows (x86_64); CPython 3.9+
-(one `abi3` wheel covers 3.12 and later). Building from source needs a C11/C++17 compiler.
+(one `abi3` wheel covers 3.12 and later) and free-threaded CPython 3.14t, which keeps running
+without the GIL. Building from source needs a C11/C++17 compiler.
 
 ## Usage
 
