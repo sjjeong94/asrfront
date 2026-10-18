@@ -12,7 +12,7 @@ from typing import Any, Union
 import numpy as np
 
 from . import _ext
-from ._audio import as_audio, as_audio_list, cached_frontend, check_int, run_parallel
+from ._audio import as_audio, cached_frontend, check_audio_list, check_int, run_batch
 
 SAMPLE_RATE = 16000
 
@@ -173,7 +173,7 @@ def fbank_batch(
         ``(B,)`` lengths.
     """
     n_mels, lfr_m, lfr_n, dither, seed = _check_params(n_mels, lfr_m, lfr_n, dither, seed)
-    items = as_audio_list(audios)
+    items = check_audio_list(audios)
     cmvn_v = _resolve_cmvn(cmvn, n_mels * lfr_m)  # load am.mvn once, not per worker
 
     fe = _frontend(n_mels, lfr_m, lfr_n, cmvn_v, dither, seed)
@@ -181,11 +181,11 @@ def fbank_batch(
     max_len = int(lengths.max()) if len(items) else 0
     feats = np.zeros((len(items), max_len, fe.feat_dim), dtype=np.float32)
 
-    def work(i: int) -> None:
+    def work(i: int, audio: np.ndarray) -> None:
         fe_i = _frontend(n_mels, lfr_m, lfr_n, cmvn_v, dither, seed)
-        fe_i.fbank(items[i], out=feats[i, : lengths[i]])
+        fe_i.fbank(audio, out=feats[i, : lengths[i]])
 
-    run_parallel(work, len(items), n_threads)
+    run_batch(work, items, n_threads)
     return feats, lengths
 
 

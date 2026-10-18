@@ -112,6 +112,42 @@ def test_batch_input_forms_and_errors(sigs):
         qwen3_asr.log_mel_batch([np.full(1000, np.nan, np.float32)])
 
 
+@pytest.mark.parametrize("hf_padding", [False, True])
+def test_batch_out_buffer(hf_padding):
+    audios = [_noise(n, i) for i, n in enumerate((16050, 480000, 300, 16000))]
+    expected, lengths = qwen3_asr.log_mel_batch(audios, hf_padding=hf_padding)
+    out = np.full(expected.shape, np.nan, np.float32)  # every value must be overwritten
+    for n_threads in (1, 3):
+        feats, lengths_out = qwen3_asr.log_mel_batch(
+            audios, n_threads=n_threads, hf_padding=hf_padding, out=out
+        )
+        assert feats is out
+        np.testing.assert_array_equal(feats, expected)
+        np.testing.assert_array_equal(lengths_out, lengths)
+        out[...] = np.nan
+
+
+def test_batch_out_errors():
+    audios = [_noise(16000, 0), _noise(8000, 1)]
+    shape = (2, 128, 100)
+    with pytest.raises(TypeError, match="float32 numpy array, got dtype float64"):
+        qwen3_asr.log_mel_batch(audios, out=np.zeros(shape))
+    with pytest.raises(TypeError, match="got list"):
+        qwen3_asr.log_mel_batch(audios, out=[])
+    with pytest.raises(
+        ValueError, match=r"out has shape \(2, 128, 101\), expected \(2, 128, 100\)"
+    ):
+        qwen3_asr.log_mel_batch(audios, out=np.zeros((2, 128, 101), np.float32))
+    with pytest.raises(ValueError, match="C-contiguous"):
+        qwen3_asr.log_mel_batch(audios, out=np.zeros((2, 128, 200), np.float32)[:, :, ::2])
+    read_only = np.zeros(shape, np.float32)
+    read_only.flags.writeable = False
+    with pytest.raises(ValueError, match="writable"):
+        qwen3_asr.log_mel_batch(audios, out=read_only)
+    feats, _ = qwen3_asr.log_mel_batch([], out=np.zeros((0, 128, 0), np.float32))
+    assert feats.shape == (0, 128, 0)
+
+
 def test_log_mel_padded_low_level_errors():
     fe = asrfront._ext.WhisperFrontend(n_mels=128, pad_or_trim=False)
     audio = _noise(1000, 0)

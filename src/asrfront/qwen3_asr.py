@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 from . import _ext
-from ._audio import as_audio, as_audio_list, cached_frontend, check_int, run_parallel
+from ._audio import as_audio, cached_frontend, check_audio_list, check_int, run_batch
 
 SAMPLE_RATE = 16000
 N_FFT = 400
@@ -68,10 +68,22 @@ def log_mel(audio: Any) -> np.ndarray:
     return _frontend().log_mel(audio)
 
 
+def _check_out(out: Any, shape: tuple[int, int, int]) -> np.ndarray:
+    if not isinstance(out, np.ndarray) or out.dtype != np.float32:
+        what = f"dtype {out.dtype}" if isinstance(out, np.ndarray) else type(out).__name__
+        raise TypeError(f"out must be a float32 numpy array, got {what}")
+    if out.shape != shape:
+        raise ValueError(f"out has shape {out.shape}, expected {shape}")
+    if not out.flags.c_contiguous or not out.flags.writeable:
+        raise ValueError("out must be C-contiguous and writable")
+    return out
+
+
 def log_mel_batch(
     audios: Sequence[Any] | np.ndarray,
     n_threads: int | None = None,
     hf_padding: bool = False,
+    out: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute :func:`log_mel` for many waveforms in parallel, padded to a common length.
 
@@ -83,6 +95,12 @@ def log_mel_batch(
             then see zeros instead of the reflection, so an item's features depend on the
             batch it is in. By default every item is computed on its own (as by
             :func:`log_mel` and the vLLM backend).
+        out: optional C-contiguous, writable float32 array of the exact ``(B, 128, T)`` shape
+            (see Returns) to write the features into, e.g. a buffer reused across calls: a new
+            array of that size costs about as much to touch for the first time as computing
+            the features in parallel. It is returned as ``features``; its whole contents are
+            overwritten (including the zeros after each item). If an error is raised after
+            the input checks (NaN / inf samples), its contents are unspecified.
 
     Returns:
         ``(features, lengths)``: float32 ``(B, 128, T)`` and int32 ``(B,)`` valid frames per
@@ -93,7 +111,7 @@ def log_mel_batch(
         - ``hf_padding=True``: ``T = L // 160`` for the longest length ``L``, every frame
           computed, ``lengths[i] = min(ceil(len_i / 160), T)``.
     """
-    items = as_audio_list(audios)
+    items = check_audio_list(audios)
     fe = _frontend()
     sizes = [a.shape[0] for a in items]
 
@@ -103,25 +121,31 @@ def log_mel_batch(
             _check_length(n_padded, "the longest item")
         n_frames = n_padded // HOP_LENGTH
         lengths = np.array([min(-(-n // HOP_LENGTH), n_frames) for n in sizes], np.int32)
-        feats = np.empty((len(items), N_MELS, n_frames), dtype=np.float32)
+        shape = (len(items), N_MELS, n_frames)
+        feats = np.empty(shape, np.float32) if out is None else _check_out(out, shape)
 
-        def work(i: int) -> None:
-            _frontend().log_mel_padded(items[i], n_padded, out=feats[i])
+        def work(i: int, audio: np.ndarray) -> None:
+            _frontend().log_mel_padded(audio, n_padded, out=feats[i])
 
     else:
         for i, n in enumerate(sizes):
             _check_length(n, f"audios[{i}]")
         lengths = np.array([fe.out_frames(n) for n in sizes], dtype=np.int32)
         n_frames = int(lengths.max()) if items else 0
-        feats = np.zeros((len(items), N_MELS, n_frames), dtype=np.float32)
+        shape = (len(items), N_MELS, n_frames)
+        # a new array is already zero after each item; a caller's buffer is cleared per item
+        feats = np.zeros(shape, np.float32) if out is None else _check_out(out, shape)
 
-        def work(i: int) -> None:
-            if lengths[i] == n_frames:  # writes straight into the (contiguous) row
-                _frontend().log_mel(items[i], out=feats[i])
-            else:
-                feats[i, :, : lengths[i]] = _frontend().log_mel(items[i])
+        def work(i: int, audio: np.ndarray) -> None:
+            n = lengths[i]
+            if n == n_frames:  # writes straight into the (contiguous) row
+                _frontend().log_mel(audio, out=feats[i])
+                return
+            feats[i, :, :n] = _frontend().log_mel(audio)
+            if out is not None:
+                feats[i, :, n:] = 0.0
 
-    run_parallel(work, len(items), n_threads)
+    run_batch(work, items, n_threads)
     return feats, lengths
 
 

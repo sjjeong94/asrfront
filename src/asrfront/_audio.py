@@ -42,6 +42,11 @@ def as_audio(audio: Any, name: str = "audio") -> np.ndarray:
     NaN / inf (also float64 values beyond the float32 range) raise ValueError: the native
     frontends would silently turn them into finite, meaningless features.
     """
+    return convert_audio(check_audio(audio, name), name)
+
+
+def check_audio(audio: Any, name: str = "audio") -> np.ndarray:
+    """The cheap part of :func:`as_audio`: shape and dtype checks, without converting."""
     a = np.asarray(audio)
     if a.ndim != 1:
         hint = ""
@@ -52,19 +57,8 @@ def as_audio(audio: Any, name: str = "audio") -> np.ndarray:
             )
         raise ValueError(f"{name} must be a 1-D mono waveform, got shape {a.shape}{hint}")
     kind = a.dtype.kind
-    if kind == "i" and a.dtype.itemsize == 2:  # int16 in either byte order
-        # one pass; the same values as astype(float32) / 32768 (a power of two)
-        return np.multiply(a, np.float32(1.0 / 32768.0), dtype=np.float32)
-    if kind == "f":
-        with np.errstate(over="ignore"):  # out-of-range values become inf, rejected below
-            out = np.ascontiguousarray(a, dtype=np.float32)
-        if not np.isfinite(out).all():
-            bad = int(np.flatnonzero(~np.isfinite(out))[0])
-            raise ValueError(
-                f"{name} contains NaN or inf (first at index {bad}, value {a[bad]!r}); "
-                "only finite samples are supported"
-            )
-        return out
+    if kind == "f" or (kind == "i" and a.dtype.itemsize == 2):
+        return a
     if kind in "iu":
         raise TypeError(
             f"{name} has integer dtype {a.dtype}; only int16 PCM is scaled automatically. "
@@ -73,7 +67,25 @@ def as_audio(audio: Any, name: str = "audio") -> np.ndarray:
     raise TypeError(f"{name} must be a float or int16 array, got dtype {a.dtype}")
 
 
-def as_audio_list(audios: Any) -> list[np.ndarray]:
+def convert_audio(a: np.ndarray, name: str = "audio") -> np.ndarray:
+    """The rest of :func:`as_audio` for an array that passed :func:`check_audio`: the cast to
+    float32 and the NaN / inf check (a pass over the samples)."""
+    if a.dtype.kind == "i":  # int16 in either byte order
+        # one pass; the same values as astype(float32) / 32768 (a power of two)
+        return np.multiply(a, np.float32(1.0 / 32768.0), dtype=np.float32)
+    with np.errstate(over="ignore"):  # out-of-range values become inf, rejected below
+        out = np.ascontiguousarray(a, dtype=np.float32)
+    if not np.isfinite(out).all():
+        bad = int(np.flatnonzero(~np.isfinite(out))[0])
+        raise ValueError(
+            f"{name} contains NaN or inf (first at index {bad}, value {a[bad]!r}); "
+            "only finite samples are supported"
+        )
+    return out
+
+
+def check_audio_list(audios: Any) -> list[np.ndarray]:
+    """:func:`check_audio` for every item of a batch; :func:`run_batch` converts them."""
     if isinstance(audios, np.ndarray) and audios.ndim == 2:
         audios = list(audios)
     try:
@@ -82,7 +94,7 @@ def as_audio_list(audios: Any) -> list[np.ndarray]:
         raise TypeError(
             f"audios must be a sequence of 1-D waveforms, got {type(audios).__name__}"
         ) from None
-    return [as_audio(a, name=f"audios[{i}]") for i, a in enumerate(items)]
+    return [check_audio(a, name=f"audios[{i}]") for i, a in enumerate(items)]
 
 
 def check_int(name: str, value: Any, lo: int, hi: int | None = None) -> int:
@@ -181,6 +193,34 @@ def run_parallel(fn: Callable[[int], None], n_items: int, n_threads: int | None)
             own.shutdown(wait=False)  # idle once wait() returned; its threads exit
     for f in futures:
         f.result()  # re-raises the first worker exception
+
+
+def run_batch(
+    fn: Callable[[int, np.ndarray], None], items: list[np.ndarray], n_threads: int | None
+) -> None:
+    """Run fn(i, convert_audio(items[i])) for the items of :func:`check_audio_list` on the
+    pool. The conversion (cast, NaN / inf check) runs in the workers too, so this pass over
+    the samples is parallel; a NaN / inf error is raised after the batch, for the lowest such
+    index, as a serial check would have raised it. Items after a known bad one are skipped."""
+    errors: list[ValueError | None] = [None] * len(items)
+    first_bad = [len(items)]
+    lock = threading.Lock()
+
+    def work(i: int) -> None:
+        if i > first_bad[0]:
+            return
+        try:
+            audio = convert_audio(items[i], f"audios[{i}]")
+        except ValueError as e:
+            errors[i] = e
+            with lock:
+                first_bad[0] = min(first_bad[0], i)
+            return
+        fn(i, audio)
+
+    run_parallel(work, len(items), n_threads)
+    if first_bad[0] < len(items):
+        raise errors[first_bad[0]]  # type: ignore[misc]
 
 
 def cached_frontend(key: tuple[Any, ...], factory: Callable[[], T]) -> T:

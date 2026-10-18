@@ -65,6 +65,7 @@ same count.
 | `log_mel(audio)` | `(128, len // 160)`: the single-item features (= transformers with one input, = vLLM) |
 | `log_mel_batch(audios)` | `(B, 128, max_i len_i // 160)` and `lengths = len_i // 160`; item `i` is `log_mel(audios[i])`, zeros after it |
 | `log_mel_batch(audios, hf_padding=True)` | `(B, 128, L // 160)` and `lengths = min(ceil(len_i / 160), L // 160)`: transformers' batch, every frame filled |
+| `log_mel_batch(audios, out=buf)` | either form, written into a caller's `(B, 128, T)` float32 buffer (e.g. reused across calls) and returned |
 | `num_audio_tokens(n_frames)` | tokens per item, for ints or integer arrays |
 
 `log_mel` runs the Whisper frontend (`n_mels=128, pad_or_trim=False`; the same native handle
@@ -138,6 +139,14 @@ Intel i5-14400F (AVX2), Python API, best of N runs:
 | 1200 s (one `qwen-asr` chunk) | 80 ms | 63 ms |
 
 Batch of 32 × 30 s: 46 ms on 1 thread, 12 ms on 8 threads.
+
+At 8 threads, a batch is limited less by the features than by memory: the same 48 × 30 s
+written into reused buffers by the workers takes 14 ms, `log_mel_batch` 23 ms. Part of the
+difference is the fresh 74 MB output array, touched for the first time (NumPy already maps it
+with huge pages): with `out=` a reused buffer, `log_mel_batch` takes 20 ms. The float32
+conversion and NaN / inf check run in the workers ([`design.md`](design.md#python-binding)):
+done serially before the batch, the same batch took 25 ms, and 61 ms instead of 32 ms for
+float64 input, which has to be converted.
 
 A 1200 s input takes more than 40 × the 30 s time. Written into a reused `out=` buffer
 (`_ext.WhisperFrontend.log_mel`) it takes 58 ms, so ~22 ms go to the fresh 61 MB output

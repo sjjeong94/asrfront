@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from . import _ext
-from ._audio import as_audio, as_audio_list, cached_frontend, run_parallel
+from ._audio import as_audio, cached_frontend, check_audio_list, run_batch
 
 SAMPLE_RATE = 16000
 N_FFT = 400
@@ -97,7 +97,7 @@ def log_mel_batch(
     """
     n_mels = _check_n_mels(n_mels)
     pad_or_trim = bool(pad_or_trim)
-    items = as_audio_list(audios)
+    items = check_audio_list(audios)
     for i, a in enumerate(items):
         _check_length(a, pad_or_trim, name=f"audios[{i}]")
 
@@ -107,8 +107,8 @@ def log_mel_batch(
     else:
         targets = [np.empty((n_mels, a.shape[0] // HOP_LENGTH), np.float32) for a in items]
 
-    def work(i: int) -> None:
-        _frontend(n_mels, pad_or_trim).log_mel(items[i], out=targets[i])
+    def work(i: int, audio: np.ndarray) -> None:
+        _frontend(n_mels, pad_or_trim).log_mel(audio, out=targets[i])
 
-    run_parallel(work, len(items), n_threads)
+    run_batch(work, items, n_threads)
     return out if pad_or_trim else targets

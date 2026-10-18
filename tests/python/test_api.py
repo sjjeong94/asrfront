@@ -119,6 +119,30 @@ def test_batch_rejects_non_finite():
         fbank_batch(items)
 
 
+@pytest.mark.parametrize("n_threads", [1, 4])
+def test_batch_non_finite_error_is_the_lowest_index(n_threads):
+    # The NaN / inf check runs in the workers; the error is still the first bad item's.
+    items = [np.zeros(16000, np.float32) for _ in range(12)]
+    for i in (9, 3, 7):
+        items[i] = items[i].copy()
+        items[i][5] = np.nan
+    items[5] = np.zeros(16000)  # float64, converted in a worker
+    items[5][77] = 1e40
+    for fn in (log_mel_batch, fbank_batch, asrfront.qwen3_asr.log_mel_batch):
+        with pytest.raises(ValueError, match=r"audios\[3\] contains NaN or inf \(first at index 5"):
+            fn(items, n_threads=n_threads)
+        with pytest.raises(ValueError, match=r"audios\[4\] .*index 77, value .*1e\+40"):
+            fn(items[:3] + items[4:7], n_threads=n_threads)  # item 5 is now 4
+
+
+def test_batch_shape_and_dtype_errors_come_first():
+    # Checked before any work, so they win over a NaN in an earlier item.
+    items = [np.full(16000, np.nan, np.float32), np.zeros(16000, np.int32)]
+    for fn in (log_mel_batch, fbank_batch, asrfront.qwen3_asr.log_mel_batch):
+        with pytest.raises(TypeError, match=r"audios\[1\] has integer dtype int32"):
+            fn(items)
+
+
 def test_big_endian_int16(sigs):
     pcm = (sigs["speech"] * 32767).astype(np.int16)
     np.testing.assert_array_equal(log_mel(pcm.astype(">i2")), log_mel(pcm))
