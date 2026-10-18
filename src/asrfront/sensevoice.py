@@ -71,7 +71,12 @@ def _resolve_cmvn(cmvn: CmvnLike | None, dim: int) -> Cmvn | None:
         raise ValueError(
             f"cmvn vectors have {shift.size}/{scale.size} values, need n_mels * lfr_m = {dim}"
         )
-    return shift[:dim], scale[:dim]  # FunASR uses the first `dim` entries
+    shift, scale = shift[:dim], scale[:dim]  # FunASR uses the first `dim` entries
+    for name, v in (("shift", shift), ("scale", scale)):
+        if not np.isfinite(v).all():
+            bad = int(np.flatnonzero(~np.isfinite(v))[0])
+            raise ValueError(f"cmvn {name} contains NaN or inf (first at index {bad})")
+    return shift, scale
 
 
 def _frontend(

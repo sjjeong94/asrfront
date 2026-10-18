@@ -119,6 +119,12 @@ def test_batch_rejects_non_finite():
         fbank_batch(items)
 
 
+def test_big_endian_int16(sigs):
+    pcm = (sigs["speech"] * 32767).astype(np.int16)
+    np.testing.assert_array_equal(log_mel(pcm.astype(">i2")), log_mel(pcm))
+    np.testing.assert_array_equal(fbank(pcm.astype(">i2")), fbank(pcm))
+
+
 @pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
 def test_float_dtypes(sigs, dtype):
     audio = sigs["speech"].astype(dtype)
@@ -248,9 +254,25 @@ def test_batch_reuses_pool_and_handles(sigs):
     pool = _audio._pool
     log_mel_batch(audios, n_threads=2)
     assert _audio._pool is pool  # no new threads per call
-    more = pool._max_workers + 1
-    log_mel_batch([sigs["speech"]] * more, n_threads=more)  # grows on demand
-    assert _audio._pool is not pool and _audio._pool._max_workers > pool._max_workers
+
+
+def test_batch_with_more_threads_than_cores(sigs):
+    import threading
+    import time
+
+    from asrfront import _audio
+
+    log_mel_batch([sigs["speech"]] * 2, n_threads=2)
+    pool, before = _audio._pool, threading.active_count()
+    more = _audio._available_cores() + 3
+    out = log_mel_batch([sigs["speech"]] * more, n_threads=more)
+    np.testing.assert_array_equal(out[-1], log_mel(sigs["speech"]))
+    assert _audio._pool is pool and pool._max_workers == _audio._available_cores()
+    for _ in range(100):  # the extra pool's threads exit
+        if threading.active_count() <= before:
+            break
+        time.sleep(0.01)
+    assert threading.active_count() <= before
 
 
 def test_run_parallel_limits_concurrency_and_raises():

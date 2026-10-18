@@ -33,7 +33,11 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
 
 - **Opaque handles** (`af_whisper`, `af_sensevoice`) hold everything that can be precomputed:
   FFT plans and twiddles, sparse mel banks, windows, scratch buffers. Create once, reuse; the hot
-  path does not allocate (SenseVoice keeps one grow-only buffer for the raw fbank before LFR).
+  path does not allocate. SenseVoice keeps the raw fbank frames LFR still needs in a ring of
+  `lfr_m + 63` frames (rounded up to blocks of 8), filled 64 frames at a time, so its memory
+  does not grow with the input; an earlier grow-only buffer for the whole raw fbank stayed at
+  the size of the longest input in every cached handle (hundreds of MB after a batch of long
+  inputs).
 - **Caller-allocated output**: `*_out_frames()` gives the size, the caller passes the buffer. The
   loader is the exception (the decoded length is unknown up front), so it allocates and provides
   `af_audio_free`.
@@ -73,10 +77,11 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
   of the key when dither is 0.
 - **Batch parallelism in Python**: `*_batch` functions run items on a thread pool. This is simpler
   and scales better than splitting one input across threads in C. The pool is shared and
-  persistent (created on first use, grown for a larger `n_threads`, reset after `fork`), so a
-  batch call neither starts threads nor rebuilds the workers' cached handles; starting a pool
-  per call cost more than the work for small batches. A batch call from inside a worker runs
-  inline instead of waiting on the pool.
+  persistent (created on first use with one thread per available core, reset after `fork`),
+  so a batch call neither starts threads nor rebuilds the workers' cached handles; starting a
+  pool per call cost more than the work for small batches. A call with `n_threads` above the
+  core count gets a pool of its own, shut down afterwards, so the threads kept for the process
+  stay bounded. A batch call from inside a worker runs inline instead of waiting on the pool.
 
 ## Audio loading (`asrfront.load`)
 

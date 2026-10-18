@@ -16,9 +16,10 @@ _local = threading.local()
 # between more than a few configurations, and each handle owns its scratch buffers.
 _CACHE_SIZE = 8
 
-# Shared worker pool for the *_batch functions, created on first use and grown on demand.
-# Persistent so that a batch call neither starts threads nor rebuilds the workers' cached
-# handles.
+# Shared worker pool for the *_batch functions, created on first use, with one thread per
+# available core. Persistent so that a batch call neither starts threads nor rebuilds the
+# workers' cached handles. A call asking for more threads than cores gets a pool of its own,
+# so the threads (and their handles) kept for the process never exceed the core count.
 _pool: ThreadPoolExecutor | None = None
 _pool_size = 0
 _pool_lock = threading.Lock()
@@ -51,7 +52,7 @@ def as_audio(audio: Any, name: str = "audio") -> np.ndarray:
             )
         raise ValueError(f"{name} must be a 1-D mono waveform, got shape {a.shape}{hint}")
     kind = a.dtype.kind
-    if a.dtype == np.int16:
+    if kind == "i" and a.dtype.itemsize == 2:  # int16 in either byte order
         # one pass; the same values as astype(float32) / 32768 (a power of two)
         return np.multiply(a, np.float32(1.0 / 32768.0), dtype=np.float32)
     if kind == "f":
@@ -112,15 +113,19 @@ def _mark_worker() -> None:
     _local.in_pool = True
 
 
+def _new_executor(workers: int) -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="asrfront", initializer=_mark_worker
+    )
+
+
 def _executor(workers: int) -> ThreadPoolExecutor:
     global _pool, _pool_size
     with _pool_lock:
-        if _pool is None or _pool_size < workers:
+        if _pool is None or _pool_size < workers:  # first use, or more cores than before
             old = _pool
             _pool_size = max(workers, _available_cores())
-            _pool = ThreadPoolExecutor(
-                max_workers=_pool_size, thread_name_prefix="asrfront", initializer=_mark_worker
-            )
+            _pool = _new_executor(_pool_size)
             if old is not None:
                 old.shutdown(wait=False)  # its queued work still runs
         return _pool
@@ -154,13 +159,18 @@ def run_parallel(fn: Callable[[int], None], n_items: int, n_threads: int | None)
                 failed.set()  # the other tasks stop taking items
                 raise
 
-    ex = _executor(workers)
-    futures: list[Future[None]] = [ex.submit(drain) for _ in range(workers)]
+    own = _new_executor(workers) if workers > _available_cores() else None
+    ex = own or _executor(workers)
     try:
-        wait(futures)  # all done before returning: workers write into caller-visible buffers
-    except BaseException:  # e.g. KeyboardInterrupt: do not finish the batch in the background
-        failed.set()
-        raise
+        futures: list[Future[None]] = [ex.submit(drain) for _ in range(workers)]
+        try:
+            wait(futures)  # all done before returning: workers write into caller-visible buffers
+        except BaseException:  # e.g. KeyboardInterrupt: do not finish the batch in the background
+            failed.set()
+            raise
+    finally:
+        if own is not None:
+            own.shutdown(wait=False)  # idle once wait() returned; its threads exit
     for f in futures:
         f.result()  # re-raises the first worker exception
 

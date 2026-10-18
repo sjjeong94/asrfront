@@ -260,9 +260,10 @@ random numbers.
 3. **FFT** — 512-point real FFT as a 256-point complex FFT (Stockham, radix 4⁴) plus the
    split step, fused with `|X|²`.
 4. **Mel** (sparse ranges) and **ln** (vectorized Cephes `logf`, floor `FLT_EPSILON`),
-   transposed into the `(T, 80)` raw buffer.
+   transposed into a ring of raw frames, 64 frames at a time.
 5. **LFR + CMVN** — row `i` copies the 7 clamped raw frames and applies
-   `(x + shift) · scale`.
+   `(x + shift) · scale`. Rows are emitted as soon as their frames are computed, so the ring
+   holds only `lfr_m + 63` frames (rounded up to 8) whatever the input length.
 
 As for Whisper, there is no FMA or reassociation, so all kernel builds (AVX2, SSE2/NEON,
 plain C) give bit-identical results.

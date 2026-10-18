@@ -80,6 +80,31 @@ def test_lfr_params(sigs, lfr_m, lfr_n):
     assert_close(actual, expected, ATOL, f"lfr {lfr_m}/{lfr_n}")
 
 
+def _lfr_from_raw(raw: np.ndarray, lfr_m: int, lfr_n: int) -> np.ndarray:
+    """FunASR apply_lfr on a raw fbank, in NumPy (exact: it only copies)."""
+    left = (lfr_m - 1) // 2
+    rows = -(-raw.shape[0] // lfr_n)
+    idx = np.arange(rows)[:, None] * lfr_n - left + np.arange(lfr_m)
+    return raw[np.clip(idx, 0, raw.shape[0] - 1)].reshape(rows, -1)
+
+
+# Raw frames are kept in a ring of lfr_m + 63 frames: rows far apart (lfr_n > 64), wide rows
+# (lfr_m > 64), lengths around the 64-frame chunks, and dither (RNG order).
+@pytest.mark.parametrize(
+    "lfr_m,lfr_n", [(7, 6), (1, 1), (1, 100), (3, 200), (100, 1), (70, 70), (130, 9)]
+)
+@pytest.mark.parametrize("n_raw", [1, 63, 64, 65, 129, 1000])
+def test_lfr_ring_matches_raw(lfr_m, lfr_n, n_raw):
+    rng = np.random.default_rng(n_raw)
+    audio = (rng.standard_normal(400 + 160 * (n_raw - 1) + 37) * 0.1).astype(np.float32)
+    sv = asrfront.sensevoice
+    for dither in (0.0, 1.0):
+        raw = sv.fbank_raw(audio, dither=dither, seed=3)
+        assert raw.shape[0] == n_raw
+        got = sv.fbank(audio, lfr_m=lfr_m, lfr_n=lfr_n, dither=dither, seed=3)
+        np.testing.assert_array_equal(got, _lfr_from_raw(raw, lfr_m, lfr_n))
+
+
 @pytest.mark.parametrize("n_samples", [0, 399, 400, 1000, 16001])
 @pytest.mark.parametrize("n_mels,lfr_m,lfr_n", [(80, 7, 6), (128, 8, 2), (80, 3, 7), (80, 1, 1)])
 def test_cmvn_preserves_separate_float32_operations(n_samples, n_mels, lfr_m, lfr_n):
@@ -146,6 +171,19 @@ def test_cmvn_validation(sigs):
 # ---------------------------------------------------------------------------------------------
 # am.mvn loading
 # ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("which", ["shift", "scale"])
+@pytest.mark.parametrize("value", [np.nan, np.inf])
+def test_cmvn_rejects_non_finite(sigs, which, value):
+    shift, scale = _synthetic_cmvn()
+    (shift if which == "shift" else scale)[17] = value
+    with pytest.raises(ValueError, match=f"cmvn {which} contains NaN or inf.*index 17"):
+        asrfront.sensevoice.fbank(sigs["speech"], cmvn=(shift, scale))
+    shift[:] = 0  # entries past n_mels * lfr_m are not used, so not checked
+    scale[:] = 1
+    long = (np.append(shift, value), np.append(scale, value))
+    asrfront.sensevoice.fbank(sigs["speech"], cmvn=long)
 
 
 def test_load_cmvn_matches_reference_parser(tmp_path):

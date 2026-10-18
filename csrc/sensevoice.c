@@ -1,5 +1,6 @@
 #include <float.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,6 +17,7 @@
 #define KALDI_LOW_FREQ 20.0
 #define KALDI_HIGH_FREQ 0.0  /* nyquist */
 #define INPUT_SCALE 32768.0f /* FunASR: waveform * (1 << 15) */
+#define LFR_CHUNK 64         /* raw frames computed between LFR passes (a multiple of AF_VL) */
 
 struct af_sensevoice {
     af_sensevoice_config cfg; /* cmvn pointers point into cmvn below */
@@ -30,9 +32,12 @@ struct af_sensevoice {
     float re[KALDI_PADDED / 2 * AF_VL], im[KALDI_PADDED / 2 * AF_VL];
     float scr_re[KALDI_PADDED / 2 * AF_VL], scr_im[KALDI_PADDED / 2 * AF_VL];
     float power[KALDI_N_BINS * AF_VL];
-    float *melv;    /* n_mels * AF_VL */
-    float *raw;     /* grow-only buffer for raw fbank before LFR */
-    size_t raw_cap; /* in floats */
+    float *melv; /* n_mels * AF_VL */
+    /* Raw fbank frames for LFR: frame t at row t % ring_frames. LFR row i reads frames up to
+     * lfr_m - 1 apart and frames are computed LFR_CHUNK at a time, so lfr_m + LFR_CHUNK - 1
+     * frames (rounded up to whole blocks) are always enough, whatever the input length. */
+    float *ring;
+    size_t ring_frames;
 };
 
 void af_sensevoice_default_config(af_sensevoice_config *cfg) {
@@ -74,7 +79,13 @@ int af_sensevoice_create(const af_sensevoice_config *cfg, af_sensevoice **out) {
 
     h->k = af_kernels_select();
     h->melv = malloc((size_t)cfg->n_mels * AF_VL * sizeof(float));
-    int rc = h->melv ? af_rfft_create(KALDI_PADDED, &h->fft) : AF_ENOMEM;
+    h->ring_frames = ((size_t)cfg->lfr_m + LFR_CHUNK + AF_VL - 2) / AF_VL * AF_VL;
+    const size_t ring_floats = h->ring_frames * (size_t)cfg->n_mels;
+    h->ring = ring_floats / h->ring_frames == (size_t)cfg->n_mels &&
+                      ring_floats < SIZE_MAX / sizeof(float)
+                  ? malloc(ring_floats * sizeof(float))
+                  : NULL;
+    int rc = h->melv && h->ring ? af_rfft_create(KALDI_PADDED, &h->fft) : AF_ENOMEM;
     if (rc == AF_OK)
         rc = af_melbank_kaldi(AF_SAMPLE_RATE, KALDI_PADDED, cfg->n_mels, KALDI_LOW_FREQ,
                               KALDI_HIGH_FREQ, &h->mel);
@@ -96,7 +107,7 @@ void af_sensevoice_destroy(af_sensevoice *h) {
     af_rfft_destroy(h->fft);
     af_melbank_destroy(h->mel);
     free(h->melv);
-    free(h->raw);
+    free(h->ring);
     free(h->cmvn);
     free(h);
 }
@@ -208,27 +219,32 @@ int af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, 
         return AF_OK;
 
     const size_t n_mels = (size_t)h->cfg.n_mels;
-    const size_t need = n_raw * n_mels;
-    if (need > h->raw_cap) {
-        float *buf = realloc(h->raw, need * sizeof(float));
-        if (!buf)
-            return AF_ENOMEM;
-        h->raw = buf;
-        h->raw_cap = need;
-    }
-    fbank_raw(h, audio, n_raw, h->raw);
-
     const ptrdiff_t m = h->cfg.lfr_m, n = h->cfg.lfr_n, left = (m - 1) / 2;
     const ptrdiff_t last = (ptrdiff_t)n_raw - 1;
     const size_t dim = n_mels * (size_t)m;
     const float *shift = h->cfg.cmvn_shift, *scale = h->cfg.cmvn_scale;
+    h->rng = splitmix64(h->cfg.seed); /* as in fbank_raw(): every frame, in order */
+    size_t done = 0;                  /* raw frames computed; a multiple of AF_VL until the end */
     for (size_t i = 0; i < n_out; i++) {
+        /* Compute raw frames, LFR_CHUNK at a time (FFT and LFR passes keep their data in
+         * cache), up to the last one this row reads. Frames below its first one,
+         * i * n - left, are not read again, so the ring never overwrites a needed frame. */
+        ptrdiff_t hi = (ptrdiff_t)i * n - left + m - 1;
+        hi = hi > last ? last : hi;
+        while ((ptrdiff_t)done <= hi) {
+            const size_t end = n_raw - done < LFR_CHUNK ? n_raw : done + LFR_CHUNK;
+            while (done < end) {
+                const int count = end - done < AF_VL ? (int)(end - done) : AF_VL;
+                fbank_block(h, audio, done, count, h->ring + done % h->ring_frames * n_mels);
+                done += (size_t)count;
+            }
+        }
         float *row = out + i * dim;
         for (ptrdiff_t j = 0; j < m; j++) {
             ptrdiff_t src = (ptrdiff_t)i * n - left + j;
             src = src < 0 ? 0 : (src > last ? last : src);
             const size_t offset = (size_t)j * n_mels;
-            const float *raw = h->raw + (size_t)src * n_mels;
+            const float *raw = h->ring + (size_t)src % h->ring_frames * n_mels;
             if (shift) {
                 /* Copy and normalize together, preserving (x + shift) * scale. */
                 for (size_t d = 0; d < n_mels; d++)
