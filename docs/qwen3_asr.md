@@ -74,6 +74,20 @@ followed by virtual zeros up to `L` samples: blocks of 8 frames that read only p
 filled with the known silence value, as for Whisper's `pad_or_trim`, and blocks whose frames
 reflect back into the input are computed.
 
+### Decisions
+
+- **Single items by default.** `log_mel_batch` computes every item on its own unless
+  `hf_padding=True`: features that do not depend on which other inputs share the batch, the
+  same as `log_mel`, batch size 1 and the vLLM backend. The transformers backend's batches
+  are available, exactly, for callers that must match it.
+- **No new kernel.** The features are Whisper large-v3's (128 slaney mels), already
+  implemented and tested; the frontend reuses the Whisper handle, and the C API only gains
+  the virtual zero padding of `hf_padding` batches.
+- **`num_audio_tokens`** is written from the rule above (three ceiling halvings per partial
+  window); the tests compare it with `_get_feat_extract_output_lengths` as published.
+- **Out of scope**: the long-audio chunking of `qwen-asr` (a pipeline step, not part of the
+  features) and its librosa / soxr loader (see [Loading audio](#loading-audio)).
+
 ## Edge cases
 
 | Input | transformers / qwen-asr | `asrfront.qwen3_asr` |
@@ -123,5 +137,12 @@ Intel i5-14400F (AVX2), Python API, best of N runs:
 | 30 s | 1.19 ms | 0.99 ms |
 | 1200 s (one `qwen-asr` chunk) | 80 ms | 63 ms |
 
-Batch of 32 × 30 s: 46 ms on 1 thread, 12 ms on 8 threads. Whisper's normalization uses the
-maximum over the whole input, so the features cannot be computed incrementally (streaming).
+Batch of 32 × 30 s: 46 ms on 1 thread, 12 ms on 8 threads.
+
+A 1200 s input takes more than 40 × the 30 s time. Written into a reused `out=` buffer
+(`_ext.WhisperFrontend.log_mel`) it takes 58 ms, so ~22 ms go to the fresh 61 MB output
+array; the remaining ~15 % over 40 × 1.25 ms is likely the normalization pass reading the
+whole spectrogram back from memory, as it no longer fits in the cache.
+
+Whisper's normalization uses the maximum over the whole input, so the features cannot be
+computed incrementally (streaming).
