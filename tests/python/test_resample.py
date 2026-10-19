@@ -52,6 +52,15 @@ def test_resample_matches_reference(sr, path):
         np.testing.assert_array_equal(got, want.astype(got.dtype))
 
 
+@pytest.mark.parametrize("sr", ALL_RATES)
+def test_float_resample_kernel_variants_are_bit_identical(sr, monkeypatch):
+    x = _signal(max(3000, sr // 4), sr).astype(np.float32)
+    default = _ext._resample(x, sr)
+    for isa in ("generic", "scalar"):
+        monkeypatch.setenv("ASRFRONT_KERNELS", isa)
+        np.testing.assert_array_equal(_ext._resample(x, sr), default)
+
+
 @pytest.mark.parametrize("n", [0, 1, 2, 3, 7, 31, 50, 99, 100, 101, 257])
 @pytest.mark.parametrize("sr", [8000, 44100, 48000, 96000])
 def test_short_inputs(sr, n):

@@ -2,6 +2,96 @@
 
 Qwen3-ASR features (`asrfront.qwen3_asr`): see [`qwen3_asr.md`](qwen3_asr.md#performance).
 
+## Apple M1 resampler and FFT updates (2026-10-20)
+
+Baseline: commit `6ec1b7f`. Environment: Apple M1 (4 performance + 4 efficiency cores),
+8 GB RAM, macOS 26.5.2 arm64, Apple Clang 21.0.0, CMake Release, Python 3.12.14,
+NumPy 2.5.3. The `generic` kernel uses NEON on this platform.
+
+Two changes preserve the arithmetic of the scalar implementation:
+
+- The float resampler uses explicit 128-bit NEON FMA instructions. Clang previously
+  generated four 64-bit FMA instructions per eight taps; it now uses two 128-bit
+  instructions, keeping the same eight accumulator chains and reduction tree.
+- Real FFT split post-processing computes bins `k` and `m-k` together, reusing their
+  input loads. Both bins retain their original twiddles and subtraction order. This
+  reduces memory access without changing the butterfly stages.
+
+The new paths are limited to aarch64 builds with vector extensions; x86 and the
+plain-C `scalar` implementation keep their previous code. Other ARM CPUs have not
+been benchmarked locally.
+
+Validation: Python suite **1883 passed, 19 skipped**, including the optional
+torch / torchaudio, transformers and ffmpeg comparisons. C tests **4/4 passed**
+in both Release and ASan/UBSan builds. New tests compare float resampling against
+the generic and scalar kernels exactly across 18 input rates, including
+interpolated-phase and extreme-rate cases.
+
+### Audio loading
+
+30 s JFK speech, re-encoded with ffmpeg 7.1. Timings are the median of 30 calls per
+build, alternating baseline and updated calls after warming their resampler caches.
+These measurements call `af_load_memory` through ctypes and include decoding,
+resampling, downmix, output allocation and freeing. File reading and the Python
+`asrfront.load` wrapper are excluded. Every output sample of each fixture matches
+the baseline bit for bit (480,000 samples per file).
+
+| Input | Before (ms) | After (ms) | Time reduction |
+|---|---:|---:|---:|
+| WAV 16 kHz mono | 0.093 | 0.093 | unchanged |
+| WAV 44.1 kHz stereo, s16 | 15.526 | 12.422 | 20.0% |
+| WAV 48 kHz mono, s16 | 7.580 | 5.771 | 23.9% |
+| FLAC 44.1 kHz stereo, 24 bit | 29.047 | 25.818 | 11.1% |
+| MP3 44.1 kHz stereo | 34.587 | 31.710 | 8.3% |
+
+### Feature extraction
+
+Synthetic 30 s input and reused outputs from `bench/bench_frontend.c`, median of
+three best-of-50 measurements per build, alternating baseline and updated runs.
+These C API timings exclude Python input validation and output allocation.
+
+| Stage | Before (ms) | After (ms) | Time reduction |
+|---|---:|---:|---:|
+| Whisper log-mel | 2.512 | 2.465 | 1.9% |
+| SenseVoice fbank, no CMVN | 3.127 | 3.075 | 1.7% |
+| SenseVoice fbank + CMVN | 3.148 | 3.089 | 1.9% |
+| 400-point FFT + power, 3000 frames | 1.244 | 1.210 | 2.7% |
+| 512-point FFT + power, 3000 frames | 1.384 | 1.344 | 2.9% |
+
+### Batch threads and output reuse
+
+The batch default remains `n_threads=None`, which selects all eight available cores
+on this M1. Qwen3-ASR already supports `out=` for reusing a writable output array.
+The comparison runner now measures explicit thread counts, automatic selection,
+and Qwen batches with and without output reuse. Run only these comparisons with:
+
+```bash
+uv run --no-sync python bench/current_environment.py --batch-only --json batch-results.json
+```
+
+Each of the runner's three passes warms the configurations, then measures 20 calls
+per configuration in a shuffled order. It reports the best time plus median and
+p95 latency; JSON retains the best-time sections and adds `*_latency` sections.
+Interleaving avoids attributing scheduling changes between sequential runs to the
+thread-count argument: automatic selection and explicit `n_threads=8` use the same
+worker count here. Timings include input validation and output allocation where
+needed. Each batch contains 32 references to one 30 s waveform, rather than 32
+independently allocated recordings. These are warm measurements with a small
+sample count; measure again for a deployment's actual workload.
+
+Median batch times below are the median of the three per-pass medians, in ms:
+
+| Batch of 32 × 30 s | 4 threads | 8 threads | Auto (8 here) |
+|---|---:|---:|---:|
+| Whisper | 22.334 | 16.815 | 16.930 |
+| SenseVoice, no CMVN | 27.528 | 19.940 | 20.100 |
+| Qwen3-ASR, new output | 27.714 | 21.371 | 21.288 |
+| Qwen3-ASR, reused output | 26.930 | 20.632 | 20.591 |
+
+Automatic selection and explicit eight-thread batches agree within about 1% in
+this run. Qwen output reuse saves about 3.5% at eight threads, so extending the
+output-buffer API is a lower priority than the native kernel changes on this M1.
+
 ## Apple M1 optimization results (2026-10-12)
 
 The three changes were evaluated in order: a NEON 4×4 transpose for Whisper's

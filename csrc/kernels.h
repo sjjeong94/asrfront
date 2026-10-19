@@ -57,7 +57,7 @@ typedef struct af_kernels {
 
     /* Resampler float path: sum h[i] * x[i] over i < width (a multiple of 8) with 8 FMA
      * accumulators and a fixed reduction tree (docs/load.md). The only kernel that uses FMA,
-     * through fmaf(), which is correctly rounded: identical in every build. */
+     * through explicit FMA instructions or fmaf(), with identical rounding in every build. */
     float (*resample_dot)(const float *h, const float *x, int width);
     /* A run of interior outputs of the exact-phase resampler, bit for bit resample_dot():
      * y[k] = resample_dot(bank + m_k * width, x + b_k, width) for k < count, starting at

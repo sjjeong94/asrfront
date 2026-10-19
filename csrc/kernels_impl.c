@@ -248,6 +248,27 @@ static void rfft_power(const af_rfft *p, float *re, float *im, float *scr_re, fl
         vst(power + c, dc * dc);
         vst(power + (size_t)m * VL + c, ny * ny);
     }
+#if defined(AF_VEC_EXT) && defined(__aarch64__)
+    /* Load each conjugate pair once. Use the original twiddle and subtraction order
+     * for each bin, including k == m-k, so the scalar result is preserved exactly. */
+    for (int k = 1; k <= m / 2; k++) {
+        const af_cpx w = p->post_tw[k], wc = p->post_tw[m - k];
+        const size_t ik = (size_t)k * VL, ic = (size_t)(m - k) * VL;
+        for (int c = 0; c < VL; c += W) {
+            const vn zkr = vld(xr + ik + c), zki = vld(xi + ik + c);
+            const vn zcr = vld(xr + ic + c), zci = vld(xi + ic + c);
+            const vn er = 0.5f * (zkr + zcr), or_ = 0.5f * (zki + zci);
+            const vn ei = 0.5f * (zki - zci), oi = -0.5f * (zkr - zcr);
+            const vn eic = 0.5f * (zci - zki), oic = -0.5f * (zcr - zkr);
+            const vn Xr = er + (w.re * or_ - w.im * oi);
+            const vn Xi = ei + (w.re * oi + w.im * or_);
+            const vn Xcr = er + (wc.re * or_ - wc.im * oic);
+            const vn Xci = eic + (wc.re * oic + wc.im * or_);
+            vst(power + ik + c, Xr * Xr + Xi * Xi);
+            vst(power + ic + c, Xcr * Xcr + Xci * Xci);
+        }
+    }
+#else
     for (int k = 1; k < m; k++) {
         const af_cpx w = p->post_tw[k];
         const size_t ik = (size_t)k * VL, ic = (size_t)(m - k) * VL;
@@ -261,6 +282,7 @@ static void rfft_power(const af_rfft *p, float *re, float *im, float *scr_re, fl
             vst(power + ik + c, Xr * Xr + Xi * Xi);
         }
     }
+#endif
 }
 
 /* ---------------------------------------------------------------------------------- */
@@ -572,6 +594,20 @@ VINLINE float resample_dot_inl(const float *h, const float *x, int width) {
         _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1)); /* a_l+a_l+4 */
     __m128 t = _mm_add_ps(s, _mm_movehl_ps(s, s));                              /* s0+s2, s1+s3 */
     return _mm_cvtss_f32(_mm_add_ss(t, _mm_shuffle_ps(t, t, 1)));               /* t0 + t1 */
+}
+#elif defined(AF_VEC_EXT) && defined(__aarch64__)
+#include <arm_neon.h>
+VINLINE float resample_dot_inl(const float *h, const float *x, int width) {
+    /* Keep the eight FMA chains and reduction tree of the scalar / AVX2 paths.
+     * Explicit 128-bit vectors avoid Clang splitting them into four 64-bit FMAs. */
+    float32x4_t a = vdupq_n_f32(0.0f), b = vdupq_n_f32(0.0f);
+    for (int i = 0; i < width; i += 8) {
+        a = vfmaq_f32(a, vld1q_f32(h + i), vld1q_f32(x + i));
+        b = vfmaq_f32(b, vld1q_f32(h + i + 4), vld1q_f32(x + i + 4));
+    }
+    const float32x4_t s = vaddq_f32(a, b);
+    const float32x2_t t = vadd_f32(vget_low_f32(s), vget_high_f32(s));
+    return vget_lane_f32(t, 0) + vget_lane_f32(t, 1);
 }
 #else
 VINLINE float resample_dot_inl(const float *h, const float *x, int width) {

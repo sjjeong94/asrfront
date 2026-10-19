@@ -7,11 +7,12 @@ Sections:
      (torchaudio), torchaudio kaldi.fbank, kaldi-native-fbank
   2. 30 s, reference libraries with all threads (asrfront stays single-threaded)
   3. input-length sweep (1 / 5 / 10 / 30 / 120 s)
-  4. batch throughput vs. number of threads
+  4. batch throughput vs. number of threads, including auto selection and Qwen buffer reuse
   5. audio loading (asrfront.load) vs. whisper.load_audio's ffmpeg command and librosa.load
 
-Times are the best of several runs (``best_ms``); libraries that are not installed are
-skipped. Reference implementations live in tests/python/reference.py.
+Times are the best of several runs (``best_ms``); batch cases also report median / p95
+latency from 20 interleaved calls. Libraries that are not installed are skipped.
+Reference implementations live in tests/python/reference.py.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import argparse
 import json
 import os
 import platform
+import random
 import sys
 import time
 from pathlib import Path
@@ -234,19 +236,54 @@ def bench_lengths(speech: np.ndarray) -> None:
 def bench_batch(audio: np.ndarray, batch: int) -> None:
     audios = [audio] * batch
     n_cpu = os.cpu_count() or 1
-    counts = sorted({1, 2, 4, 8, n_cpu})
-    print(f"\n[4] Batch of {batch} x 30 s, time per batch vs. n_threads")
-    for name, fn in (
+    counts: list[int | None] = [*sorted({1, 2, 4, 8, n_cpu}), None]
+    # Allocate once, outside the timed calls. Every item has the same frame count.
+    qwen_out = np.empty((batch, 128, len(audio) // 160), dtype=np.float32)
+    functions = (
         ("whisper.log_mel_batch", lambda n: asrfront.whisper.log_mel_batch(audios, n_threads=n)),
         ("sensevoice.fbank_batch", lambda n: asrfront.sensevoice.fbank_batch(audios, n_threads=n)),
-    ):
+        (
+            "qwen3_asr.log_mel_batch",
+            lambda n: asrfront.qwen3_asr.log_mel_batch(audios, n_threads=n),
+        ),
+        (
+            "qwen3_asr.log_mel_batch (out)",
+            lambda n: asrfront.qwen3_asr.log_mel_batch(audios, n_threads=n, out=qwen_out),
+        ),
+    )
+    cases = [(name, n, fn) for name, fn in functions for n in counts]
+    samples: dict[tuple[str, int | None], list[float]] = {(name, n): [] for name, n, _ in cases}
+    for _, n, fn in cases:
+        fn(n)  # warm the worker handles and reused output before timing
+    rng = random.Random(0)
+    for _ in range(20):
+        # Sequential runs can make auto vs. explicit threads look different even when
+        # they select the same workers. Interleave configurations across the same load.
+        rng.shuffle(cases)
+        for name, n, fn in cases:
+            start = time.perf_counter()
+            fn(n)
+            samples[name, n].append((time.perf_counter() - start) * 1e3)
+
+    print(f"\n[4] Batch of {batch} x 30 s, 20 interleaved calls per configuration")
+    for name, _ in functions:
         sec = f"batch{batch}_{name}"
         base = None
         for n in counts:
-            ms = best_ms(lambda fn=fn, n=n: fn(n), reps=5)
+            times = samples[name, n]
+            ms = min(times)
+            median, p95 = np.percentile(times, [50, 95])
             base = base or ms
             RESULTS.setdefault(sec, {})[str(n)] = ms
-            print(f"  {name:24s} {n:3d} threads {ms:8.2f} ms  ({base / ms:4.1f}x)")
+            RESULTS.setdefault(f"{sec}_latency", {})[str(n)] = {
+                "median_ms": float(median),
+                "p95_ms": float(p95),
+            }
+            label = "auto" if n is None else str(n)
+            print(
+                f"  {name:28s} {label:>4s} threads best {ms:7.2f} ms ({base / ms:4.1f}x)"
+                f"  median {median:7.2f} ms  p95 {p95:7.2f} ms"
+            )
 
 
 def bench_load(seconds: int = 30) -> None:

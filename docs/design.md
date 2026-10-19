@@ -26,8 +26,9 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
   - every kernel variant (AVX2, baseline SSE2/NEON, plain C) uses the same operation order and gives
     **bit-identical** results; tests compare the variants exactly;
   - the one place that uses FMA is the resampler's float path, which must reproduce ffmpeg's
-    AVX2/FMA3 dot product bit for bit ([`load.md`](load.md)). It calls `fmaf()` explicitly, which
-    the C standard requires to be correctly rounded, so hardware FMA and the libm fallback agree.
+    AVX2/FMA3 dot product bit for bit ([`load.md`](load.md)). It uses explicit FMA intrinsics
+    (AVX2 / NEON) or correctly rounded `fmaf()`, with the same eight accumulator chains and
+    reduction tree, so the hardware and libm paths agree.
 
 ## C core
 
@@ -59,6 +60,9 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
   so they vectorize at any SIMD width. Frames are gathered with register transposes.
 - Kernels use GCC/Clang vector extensions at the native width (8 floats with AVX, 4 with SSE2 /
   NEON); other compilers (MSVC) get plain floats.
+- On aarch64, the float resampler uses two explicit 128-bit NEON FMA accumulators, retaining
+  eight independent scalar lanes. The real FFT split processes bins `k` and `m-k` together
+  to reuse their complex input loads; each bin keeps its own twiddle and subtraction order.
 - `kernels_impl.c` is compiled once per ISA: `generic` (baseline), `avx2` (x86-64, with `-mfma`
   for the resampler only) and `scalar` (no vector extensions = the MSVC code path, built
   everywhere so it is tested on every platform). The table is selected at runtime with cpuid

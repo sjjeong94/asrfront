@@ -14,14 +14,18 @@ import numpy as np
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", type=Path, required=True)
+    parser.add_argument(
+        "--batch-only", action="store_true", help="only compare batch configurations"
+    )
     args = parser.parse_args()
     signals = benchmark.signals()
     audio = np.ascontiguousarray(signals["speech_35s"][: 30 * benchmark.SR])
     runs = []
     for _ in range(3):
         benchmark.RESULTS = {}
-        benchmark.bench_single(audio)
-        benchmark.bench_lengths(np.asarray(signals["speech"]))
+        if not args.batch_only:
+            benchmark.bench_single(audio)
+            benchmark.bench_lengths(np.asarray(signals["speech"]))
         benchmark.bench_batch(audio, 32)
         runs.append(benchmark.RESULTS)
         args.json.write_text(json.dumps({"env": benchmark.environment(), "runs": runs}, indent=2))
