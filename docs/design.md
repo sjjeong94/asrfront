@@ -121,8 +121,11 @@ Options can be added later without breaking `load(source)`.
   loading a 2 s clip. This is the only shared state in the C core.
 - Untrusted input: malformed files must fail cleanly (bounds checks on every header field, no
   allocation sized from an unvalidated header, fuzzing in CI). The decoded size, however, can be
-  far larger than the file; `load` has no limit option, and callers that accept uploads bound
-  the size or duration themselves ([`load.md`, "Resource use"](load.md#resource-use)).
+  far larger than the file, so `load(..., max_duration=)` rejects long audio from the frame
+  count, before allocating the samples where the codec allows (every format but FLAC / MP3,
+  which stop one frame past the limit) ([`load.md`, "Resource use"](load.md#resource-use)).
+  It was first left to callers, but checking the duration before `load` means parsing the
+  header twice, and for FLAC / MP3 there is no reliable header length to check.
 
 ### Format detection
 

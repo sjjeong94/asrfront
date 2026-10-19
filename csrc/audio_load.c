@@ -87,7 +87,12 @@ static container detect(const uint8_t *buf, size_t size) {
     return FMT_UNKNOWN;
 }
 
-int af_load_memory(const void *buf_, size_t size, af_raw_mode raw, float **out, size_t *n_samples) {
+int af_load_memory(const void *buf, size_t size, af_raw_mode raw, float **out, size_t *n_samples) {
+    return af_load_memory_ex(buf, size, raw, 0, out, n_samples);
+}
+
+int af_load_memory_ex(const void *buf_, size_t size, af_raw_mode raw, size_t max_samples,
+                      float **out, size_t *n_samples) {
     if (!out || !n_samples || (!buf_ && size > 0))
         return AF_EINVAL;
     *out = NULL;
@@ -101,30 +106,30 @@ int af_load_memory(const void *buf_, size_t size, af_raw_mode raw, float **out, 
     container fmt = raw == AF_RAW_FORCE ? FMT_UNKNOWN : detect(buf, size);
     switch (fmt) {
     case FMT_WAV:
-        rc = af_wav_decode(buf, size, &d);
+        rc = af_wav_decode(buf, size, max_samples, &d);
         break;
     case FMT_W64:
-        rc = af_w64_decode(buf, size, &d);
+        rc = af_w64_decode(buf, size, max_samples, &d);
         break;
     case FMT_AIFF:
-        rc = af_aiff_decode(buf, size, &d);
+        rc = af_aiff_decode(buf, size, max_samples, &d);
         break;
     case FMT_CAF:
-        rc = af_caf_decode(buf, size, &d);
+        rc = af_caf_decode(buf, size, max_samples, &d);
         break;
     case FMT_SPHERE:
-        rc = af_sphere_decode(buf, size, &d);
+        rc = af_sphere_decode(buf, size, max_samples, &d);
         break;
     case FMT_FLAC:
-        rc = af_flac_decode(buf, size, &d);
+        rc = af_flac_decode(buf, size, max_samples, &d);
         break;
     case FMT_MP3:
-        rc = af_mp3_decode(buf, size, &d);
+        rc = af_mp3_decode(buf, size, max_samples, &d);
         break;
     default:
         if (raw == AF_RAW_NEVER)
             return AF_EUNSUPPORTED;
-        rc = af_pcm_decode_raw(buf, size, &d);
+        rc = af_pcm_decode_raw(buf, size, max_samples, &d);
         break;
     }
     if (rc != AF_OK)

@@ -29,6 +29,7 @@ enum {
     AF_EUNSUPPORTED = -4, /* unsupported file format / codec / sample rate */
     AF_EIO = -5,          /* file could not be opened or read */
     AF_ECORRUPT = -6,     /* malformed or truncated file */
+    AF_ETOOLONG = -7,     /* audio longer than the caller's limit */
 };
 
 const char *af_version(void);
@@ -120,6 +121,13 @@ typedef enum {
  * On success *out is allocated by the library (release with af_audio_free) and
  * *n_samples is set; on error *out is NULL. */
 int af_load_memory(const void *buf, size_t size, af_raw_mode raw, float **out, size_t *n_samples);
+
+/* As af_load_memory, failing with AF_ETOOLONG when the output would have more than
+ * max_samples samples (0: no limit). Checked from the decoded frame count before the samples
+ * are allocated (PCM and ADPCM codecs) or while decoding (FLAC, MP3, stopping one frame past
+ * the limit), so a small file that would decode to gigabytes fails early. */
+int af_load_memory_ex(const void *buf, size_t size, af_raw_mode raw, size_t max_samples,
+                      float **out, size_t *n_samples);
 
 /* Same for a file (UTF-8 path). `.pcm` / `.raw` extensions select AF_RAW_FORCE,
  * anything else AF_RAW_NEVER. */

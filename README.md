@@ -39,6 +39,7 @@ torch tensor — e.g. from `asrfront.load`.
 audio = asrfront.load("speech.wav")  # path (str / os.PathLike)
 audio = asrfront.load(request_body)  # bytes / bytearray / memoryview / uint8 array
 audio = asrfront.load("stream.pcm")  # raw s16le 16 kHz mono (.pcm / .raw, or headerless bytes)
+audio = asrfront.load(upload, max_duration=600)  # ValueError if longer than 10 min
 ```
 
 Returns a 1-D float32 array at 16 kHz mono (`asrfront.SAMPLE_RATE`), the input both Whisper and
@@ -61,7 +62,8 @@ SenseVoiceSmall expect — the same as `whisper.load_audio(path)`, i.e.
 - untrusted input: malformed files fail with `ValueError` (the loader is fuzzed in CI), but
   memory use grows with the *decoded* length, which a small file can make huge — a 23 kB FLAC
   of 8-channel 384 kHz silence decodes to ~360 MB (ffmpeg behaves the same). Services that load
-  user uploads should limit the upload size accordingly, or check the duration first
+  user uploads should pass `max_duration` (seconds): longer audio raises `ValueError`, before
+  it is decoded for uncompressed and ADPCM formats, at the limit for FLAC / MP3
   ([`docs/load.md`, "Resource use"](https://github.com/sjjeong94/asrfront/blob/main/docs/load.md#resource-use))
 
 ### Whisper

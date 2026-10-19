@@ -21,6 +21,8 @@ import reference as ref
 from audio_signals import DATA_DIR
 from helpers import ffmpeg_is_reference_build
 
+CORPUS = sorted((Path(__file__).parent.parent / "fuzz" / "corpus").iterdir())
+
 # ffmpeg's float path is CPU dependent (docs/load.md, "Other platforms"): bit-exact comparisons
 # only against ffmpeg on x86-64 with AVX2 + FMA3, otherwise up to 1 LSB.
 FFMPEG_EXACT = ffmpeg_is_reference_build()
@@ -101,6 +103,36 @@ def test_raw_bytes_not_mistaken_for_mp3(pattern):
 def test_empty():
     assert asrfront.load(b"").shape == (0,)
     assert asrfront.load(b"").dtype == np.float32
+
+
+@pytest.mark.parametrize("path", CORPUS, ids=lambda p: p.name)
+def test_max_duration_boundary(path):
+    """Every container and codec: n output samples pass max_duration = n / 16000, and one
+    sample less is rejected."""
+    n = len(asrfront.load(path))
+    np.testing.assert_array_equal(asrfront.load(path, max_duration=n / 16000), asrfront.load(path))
+    if n > 1:
+        with pytest.raises(ValueError, match="longer than max_duration"):
+            asrfront.load(path, max_duration=(n - 1) / 16000)
+        with pytest.raises(ValueError, match="longer than max_duration"):
+            asrfront.load(path.read_bytes(), max_duration=(n - 1) / 16000)
+
+
+def test_max_duration_values(tmp_path):
+    path = write_wav(tmp_path / "a.wav", noise_s16(16000))
+    assert len(asrfront.load(path, max_duration=1)) == 16000
+    assert len(asrfront.load(path, max_duration=np.float32(1.5))) == 16000
+    for d in (1.1 - 0.1, 0.29 * 100 / 29):  # 1.0 up to float rounding: still 16000 samples
+        assert len(asrfront.load(path, max_duration=d)) == 16000
+    for bad in (0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="max_duration must be"):
+            asrfront.load(path, max_duration=bad)
+    for bad in ("1", True):
+        with pytest.raises(TypeError, match="max_duration must be a number"):
+            asrfront.load(path, max_duration=bad)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="longer than max_duration=1e-09 s"):
+        asrfront.load(path, max_duration=1e-9)  # rounded up to one sample
+    assert len(asrfront.load(b"", max_duration=1)) == 0
 
 
 def test_errors(tmp_path):
@@ -570,6 +602,18 @@ def test_compressed_bytes_and_misnamed(tmp_path, ext):
     other = tmp_path / "audio.wav"
     other.write_bytes(path.read_bytes())
     np.testing.assert_array_equal(asrfront.load(other), expected)
+
+
+@pytest.mark.parametrize("ext", ["flac", "mp3"])
+def test_max_duration_compressed(tmp_path, ext):
+    """Compressed formats stop decoding at the limit (past the first 65536-frame buffer)."""
+    codec = {"flac": "flac", "mp3": "libmp3lame"}[ext]
+    path = ffmpeg_write(tmp_path / f"a.{ext}", np.zeros((10 * 48000, 2)), codec, sr=48000)
+    n = len(asrfront.load(path))
+    assert len(asrfront.load(path, max_duration=n / 16000)) == n
+    for d in (1.0, 5.0, (n - 1) / 16000):
+        with pytest.raises(ValueError, match="longer than max_duration"):
+            asrfront.load(path, max_duration=d)
 
 
 @pytest.mark.parametrize("ext", ["flac", "mp3"])

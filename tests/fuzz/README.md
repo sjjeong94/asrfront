@@ -3,7 +3,9 @@
 `fuzz_load.c` is a libFuzzer target for the audio loader (every container parser and
 decoder). Besides memory errors (ASan) and undefined behavior (UBSan) it checks the output
 contract: on success every sample is an int16 value / 32768, on failure the output is NULL and
-the error code is one of `AF_ECORRUPT`, `AF_EUNSUPPORTED`, `AF_ENOMEM`.
+the error code is one of `AF_ECORRUPT`, `AF_EUNSUPPORTED`, `AF_ENOMEM`. A decoded input is
+loaded again with `af_load_memory_ex` limited to its own length (same output) and to one
+sample less (`AF_ETOOLONG`).
 
 | File | Purpose |
 |---|---|

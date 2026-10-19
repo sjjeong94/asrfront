@@ -46,10 +46,15 @@ typedef struct af_decoded {
     uint32_t layout[AF_MAX_CHANNELS]; /* position bit per channel */
     size_t n_frames;
     void *data;
+    size_t limit; /* the caller's limit in 16 kHz samples (0: none); see af_frame_limit */
 } af_decoded;
 
 void af_decoded_free(af_decoded *d);
-/* Allocate d->data for d->n_frames * d->channels samples of `fmt` and set d->fmt. */
+/* Most frames at d->sample_rate that resample to at most d->limit samples at 16 kHz
+ * (SIZE_MAX if there is no limit). */
+size_t af_frame_limit(const af_decoded *d);
+/* Allocate d->data for d->n_frames * d->channels samples of `fmt` and set d->fmt;
+ * AF_ETOOLONG if d->n_frames exceeds af_frame_limit(d). */
 int af_decoded_alloc(af_decoded *d, af_sample_fmt fmt);
 
 /* Coded sample formats of the uncompressed codecs (pcm.c). */
@@ -94,15 +99,19 @@ int af_coreaudio_layout(const uint8_t *body, size_t size, int channels, uint32_t
 
 extern const uint8_t af_w64_riff_guid[16]; /* first 16 bytes of a Wave64 file */
 
-/* Container decoders. On success *out owns its samples. */
-int af_wav_decode(const uint8_t *buf, size_t size, af_decoded *out);  /* RIFF / RF64 / BW64 */
-int af_w64_decode(const uint8_t *buf, size_t size, af_decoded *out);  /* Sony Wave64 */
-int af_aiff_decode(const uint8_t *buf, size_t size, af_decoded *out); /* AIFF / AIFF-C */
-int af_caf_decode(const uint8_t *buf, size_t size, af_decoded *out);
-int af_sphere_decode(const uint8_t *buf, size_t size, af_decoded *out);  /* NIST SPHERE */
-int af_pcm_decode_raw(const uint8_t *buf, size_t size, af_decoded *out); /* s16le 16k mono */
-int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out);
-int af_mp3_decode(const uint8_t *buf, size_t size, af_decoded *out);
+/* Container decoders. On success *out owns its samples. `limit` as in af_decoded. */
+int af_wav_decode(const uint8_t *buf, size_t size, size_t limit,
+                  af_decoded *out); /* RIFF / RF64 / BW64 */
+int af_w64_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out); /* Sony Wave64 */
+int af_aiff_decode(const uint8_t *buf, size_t size, size_t limit,
+                   af_decoded *out); /* AIFF / AIFF-C */
+int af_caf_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out);
+int af_sphere_decode(const uint8_t *buf, size_t size, size_t limit,
+                     af_decoded *out); /* NIST SPHERE */
+int af_pcm_decode_raw(const uint8_t *buf, size_t size, size_t limit,
+                      af_decoded *out); /* s16le 16k mono */
+int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out);
+int af_mp3_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out);
 
 /* Mono downmix weights (normalized when their sum exceeds 1). */
 void af_downmix_weights(const uint32_t *layout, int channels, double *w);

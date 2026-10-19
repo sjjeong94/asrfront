@@ -29,6 +29,9 @@ const double *af_resampler_bank(const af_resampler *r, int m);
 
 /* Number of output samples for n input samples. */
 size_t af_resampler_out_len(const af_resampler *r, size_t n);
+/* The largest n whose af_resampler_out_len() from sr_in to sr_out is at most max_out
+ * (SIZE_MAX if it does not fit). Needs no resampler. */
+size_t af_resample_max_in(int sr_in, int sr_out, size_t max_out);
 
 /* y must hold af_resampler_out_len(r, n) samples. */
 void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y);

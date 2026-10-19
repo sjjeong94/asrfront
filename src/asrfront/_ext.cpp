@@ -40,6 +40,7 @@ static void check(int rc) {
         throw nb::python_error();
     case AF_EUNSUPPORTED:
     case AF_ECORRUPT:
+    case AF_ETOOLONG:
         throw nb::value_error(af_strerror(rc));
     case AF_EIO:
         PyErr_SetString(PyExc_OSError, af_strerror(rc));
@@ -198,22 +199,24 @@ NB_MODULE(_ext, m) {
 
     m.def(
         "load_memory",
-        [](Bytes data, int raw) {
+        [](Bytes data, int raw, size_t max_samples) {
             float *buf = nullptr;
             size_t n = 0;
             int rc;
             {
                 nb::gil_scoped_release release;
-                rc = af_load_memory(data.data(), data.shape(0), (af_raw_mode)raw, &buf, &n);
+                rc = af_load_memory_ex(data.data(), data.shape(0), (af_raw_mode)raw, max_samples,
+                                       &buf, &n);
             }
             check(rc);
             nb::capsule owner(buf,
                               [](void *p) noexcept { af_audio_free(static_cast<float *>(p)); });
             return Out1D(buf, {n}, owner);
         },
-        "data"_a, "raw"_a,
+        "data"_a, "raw"_a, "max_samples"_a = 0,
         "Decode an in-memory audio file to 16 kHz mono float32. raw: 0 auto, 1 never, 2 force "
-        "(raw = headerless s16le 16 kHz mono).");
+        "(raw = headerless s16le 16 kHz mono). max_samples > 0: ValueError if the audio is "
+        "longer than max_samples / 16000 s.");
 
     m.def(
         "_resample",

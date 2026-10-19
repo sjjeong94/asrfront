@@ -5,6 +5,7 @@
 
 #include "asrfront.h"
 #include "audio.h"
+#include "resample.h"
 
 static uint16_t rd16le(const uint8_t *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
@@ -47,9 +48,17 @@ void af_decoded_free(af_decoded *d) {
     }
 }
 
+size_t af_frame_limit(const af_decoded *d) {
+    if (d->limit == 0 || d->sample_rate <= 0)
+        return SIZE_MAX;
+    return af_resample_max_in(d->sample_rate, AF_SAMPLE_RATE, d->limit);
+}
+
 int af_decoded_alloc(af_decoded *d, af_sample_fmt fmt) {
     static const size_t elem_size[] = {1, 2, 4, 4, 8}; /* by af_sample_fmt */
     size_t es = elem_size[fmt];
+    if (d->n_frames > af_frame_limit(d))
+        return AF_ETOOLONG;
     size_t n = d->n_frames * (size_t)d->channels;
     if (d->channels > 0 && n / (size_t)d->channels != d->n_frames)
         return AF_ECORRUPT;
@@ -182,8 +191,9 @@ int af_pcm_decode_frames(af_decoded *d, af_pcm_codec c, const uint8_t *src, size
     return rc;
 }
 
-int af_pcm_decode_raw(const uint8_t *buf, size_t size, af_decoded *out) {
+int af_pcm_decode_raw(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
     memset(out, 0, sizeof(*out));
+    out->limit = limit;
     out->channels = 1;
     out->sample_rate = AF_SAMPLE_RATE;
     out->layout[0] = AF_CH_FC;

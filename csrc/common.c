@@ -21,6 +21,8 @@ const char *af_strerror(int err) {
         return "cannot read file";
     case AF_ECORRUPT:
         return "malformed or truncated audio file";
+    case AF_ETOOLONG:
+        return "audio longer than the limit";
     default:
         return "unknown error";
     }

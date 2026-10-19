@@ -376,8 +376,18 @@ float32 output. That is proportional to the audio's duration, not to the file si
 Header fields never size an allocation beyond what the file can hold (the FLAC total frame
 count is only a hint, capped by the input size; tested by `tests/fuzz`), so the limit above is
 the only amplification. ffmpeg has the same property. Callers that load untrusted uploads
-should bound what they accept, e.g. the upload size (with FLAC in mind), or the duration read
-from the header before calling `load`. There is deliberately no limit option in `load` itself.
+should pass `max_duration` (seconds; `af_load_memory_ex`'s `max_samples` in C): audio whose
+16 kHz output would be longer raises `ValueError` ("longer than max_duration") instead of being
+decoded. The check uses the frame count and rate, matching the resampler's output length
+exactly (n output samples pass `max_duration=n / 16000`, n + 1 do not):
+
+- PCM, float, G.711 and ADPCM: before the samples are allocated, from the data size, so a
+  rejected file costs only the header parsing.
+- FLAC and MP3 (no reliable length in the header): while decoding, stopping one frame past the
+  limit, so a rejected file uses at most the decoded size of `max_duration` (for the 30 s FLAC
+  above with `max_duration=10`: ~120 MB instead of ~360 MB plus the output).
+
+The file itself is still read whole, so bound the upload size as well.
 
 Besides that, the process keeps up to 4 resamplers for the rates it loaded most recently
 (each with at most 1 MiB of filters; larger banks, i.e. interpolated mode at high rates, are

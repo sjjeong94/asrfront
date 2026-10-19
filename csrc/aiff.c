@@ -39,8 +39,9 @@ static int pcm_by_bits(int bits, af_pcm_codec *c) {
     return AF_OK;
 }
 
-int af_aiff_decode(const uint8_t *buf, size_t size, af_decoded *out) {
+int af_aiff_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
     memset(out, 0, sizeof(*out));
+    out->limit = limit;
     if (size < 12 || memcmp(buf, "FORM", 4) != 0)
         return AF_ECORRUPT;
     int aifc = memcmp(buf + 8, "AIFC", 4) == 0;

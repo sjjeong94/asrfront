@@ -293,6 +293,18 @@ size_t af_resampler_out_len(const af_resampler *r, size_t n) {
     return (size_t)((m * r->q + r->p - 1) / r->p);
 }
 
+size_t af_resample_max_in(int sr_in, int sr_out, size_t max_out) {
+    if (sr_in == sr_out)
+        return max_out;
+    /* out_len = ceil(m * q / p) <= max_out  <=>  m <= floor(max_out * p / q) */
+    const uint64_t g = gcd_u64((uint64_t)sr_in, (uint64_t)sr_out);
+    const uint64_t p = (uint64_t)sr_in / g, q = (uint64_t)sr_out / g;
+    if ((uint64_t)max_out > (UINT64_MAX - 1) / p)
+        return SIZE_MAX;
+    const uint64_t n = (uint64_t)max_out * p / q + (sr_in > 2 * sr_out ? 1 : 0); /* m = n - 1 */
+    return n < SIZE_MAX ? (size_t)n : SIZE_MAX;
+}
+
 /* Position of output k: base sample b, filter row m and interpolation numerator fr / q.
  * Stepped incrementally (t_k = k * p / q) to avoid two 64-bit divisions per output. */
 typedef struct {

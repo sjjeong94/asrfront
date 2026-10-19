@@ -104,8 +104,9 @@ static int decode_data(const wav_fmt *f, const uint8_t *data, size_t size, af_de
     }
 }
 
-int af_wav_decode(const uint8_t *buf, size_t size, af_decoded *out) {
+int af_wav_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
     memset(out, 0, sizeof(*out));
+    out->limit = limit;
     if (size < 12 || memcmp(buf + 8, "WAVE", 4) != 0)
         return AF_ECORRUPT;
     int rf64 = memcmp(buf, "RF64", 4) == 0 || memcmp(buf, "BW64", 4) == 0;
@@ -167,8 +168,9 @@ static int w64_id(const uint8_t *guid, const char *fourcc) {
     return memcmp(guid, fourcc, 4) == 0 && memcmp(guid + 4, W64_GUID_TAIL, 12) == 0;
 }
 
-int af_w64_decode(const uint8_t *buf, size_t size, af_decoded *out) {
+int af_w64_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
     memset(out, 0, sizeof(*out));
+    out->limit = limit;
     if (size < 40 || memcmp(buf, af_w64_riff_guid, 16) != 0 || !w64_id(buf + 24, "wave"))
         return AF_ECORRUPT;
     wav_fmt fmt;

@@ -48,8 +48,9 @@ static void on_meta(void *user, drflac_metadata *m) {
     }
 }
 
-int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out) {
+int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
     memset(out, 0, sizeof(*out));
+    out->limit = limit;
     uint32_t mask = 0;
     drflac *f = drflac_open_memory_with_metadata(buf, size, on_meta, &mask, NULL);
     if (!f)
@@ -61,6 +62,10 @@ int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out) {
         drflac_close(f);
         return ch > 8 ? AF_EUNSUPPORTED : AF_ECORRUPT;
     }
+    out->channels = ch;
+    out->sample_rate = (int)f->sampleRate;
+    /* Frames past the caller's limit are an error: decoding one more than the limit tells. */
+    const size_t lim = af_frame_limit(out), lim_cap = lim < SIZE_MAX ? lim + 1 : SIZE_MAX;
     /* Decode as left-justified s32, growing the buffer: the header's total may be 0 (unknown)
      * or larger than what a truncated file holds. It is a hint only, never trusted beyond the
      * input size: a 10 kB file claiming 2^28 frames must not allocate gigabytes up front. */
@@ -69,12 +74,13 @@ int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out) {
      * (n < cap) instead of growing the full buffer just before EOF. */
     if (f->totalPCMFrameCount > 0 && f->totalPCMFrameCount < cap)
         cap = (size_t)f->totalPCMFrameCount + 1;
+    cap = cap < lim_cap ? cap : lim_cap;
     size_t n = 0;
     int32_t *pcm = malloc(cap * (size_t)ch * sizeof(int32_t));
-    while (pcm) {
+    while (pcm && n <= lim) {
         if (n == cap) {
-            size_t ncap = cap * 2;
-            int32_t *p = ncap / 2 == cap ? realloc(pcm, ncap * (size_t)ch * sizeof(int32_t)) : NULL;
+            size_t ncap = cap * 2 < lim_cap ? cap * 2 : lim_cap;
+            int32_t *p = ncap > cap ? realloc(pcm, ncap * (size_t)ch * sizeof(int32_t)) : NULL;
             if (!p) {
                 free(pcm);
                 pcm = NULL;
@@ -88,14 +94,16 @@ int af_flac_decode(const uint8_t *buf, size_t size, af_decoded *out) {
             break;
         n += (size_t)got;
     }
-    out->channels = ch;
-    out->sample_rate = (int)f->sampleRate;
     out->n_frames = n;
     if (!mask || af_mask_layout(mask, ch, out->layout) != AF_OK)
         memcpy(out->layout, flac_layouts[ch - 1], (size_t)ch * sizeof(uint32_t));
     drflac_close(f);
     if (!pcm)
         return AF_ENOMEM;
+    if (n > lim) {
+        free(pcm);
+        return AF_ETOOLONG;
+    }
 
     if (bps <= 16) { /* ffmpeg decodes up to 16 bits as s16 (left-justified) */
         int16_t *s = malloc(n * (size_t)ch * sizeof(int16_t) + 1);

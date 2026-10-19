@@ -51,8 +51,9 @@ static int lower_eq(const char *s, const char *lit) {
 
 /* "NIST_1A\n", the header size on the second line, then "key -type value" lines up to
  * "end_head". Keys are matched by prefix and the last occurrence wins (as in ffmpeg). */
-int af_sphere_decode(const uint8_t *buf, size_t size, af_decoded *out) {
+int af_sphere_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
     memset(out, 0, sizeof(*out));
+    out->limit = limit;
     if (size < 8 || memcmp(buf, "NIST_1A\n", 8) != 0)
         return AF_ECORRUPT;
     long header_size = 0, channels = 0, n_bytes = 0, rate = 0;

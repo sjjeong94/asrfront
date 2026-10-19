@@ -225,6 +225,42 @@ static void test_wav_errors(void) {
     }
 }
 
+static void test_limit(void) {
+    float *a = NULL;
+    size_t n = 0;
+    buf_t w;
+    wav_head(&w, 1, 2, 16000, 16, 0);
+    put(&w, "data\x20\0\0\0", 8);
+    for (int i = 0; i < 32; i++)
+        put(&w, "\x11", 1); /* 8 stereo frames */
+    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 8, &a, &n) == AF_OK && n == 8);
+    af_audio_free(a);
+    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 0, &a, &n) == AF_OK && n == 8);
+    af_audio_free(a);
+    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 7, &a, &n) == AF_ETOOLONG && !a && n == 0);
+    CHECK(af_load_memory_ex(w.b, 44 + 28, AF_RAW_NEVER, 7, &a, &n) == AF_OK && n == 7);
+    af_audio_free(a);
+    const uint8_t pcm[6] = {0};
+    CHECK(af_load_memory_ex(pcm, 6, AF_RAW_FORCE, 2, &a, &n) == AF_ETOOLONG);
+    CHECK(strcmp(af_strerror(AF_ETOOLONG), "audio longer than the limit") == 0);
+
+    /* af_resample_max_in is the exact inverse of af_resampler_out_len */
+    static const int rates[] = {1000,  8000,  11025, 22050, 32000,
+                                32001, 44100, 48000, 96000, 384000};
+    for (size_t i = 0; i < sizeof rates / sizeof rates[0]; i++) {
+        af_resampler *r = NULL;
+        CHECK(af_resampler_create(rates[i], 16000, &r) == AF_OK);
+        if (!r)
+            continue;
+        for (size_t lim = 0; lim < 500; lim++) {
+            size_t m = af_resample_max_in(rates[i], 16000, lim);
+            CHECK(af_resampler_out_len(r, m) <= lim && af_resampler_out_len(r, m + 1) > lim);
+        }
+        af_resampler_destroy(r);
+    }
+    CHECK(af_resample_max_in(384000, 16000, SIZE_MAX / 2) == SIZE_MAX); /* no overflow */
+}
+
 static void test_raw_and_detection(void) {
     float *a = NULL;
     size_t n = 0;
@@ -571,6 +607,7 @@ int main(void) {
     test_wav_formats();
     test_wav_errors();
     test_raw_and_detection();
+    test_limit();
     test_layouts();
     test_aiff();
     test_caf();
