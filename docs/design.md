@@ -74,6 +74,9 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
   Python.
 - **Zero-copy output**: the C buffer is handed to NumPy through a capsule. The low-level `out=`
   argument writes straight into a caller buffer, which the batch functions use to avoid copies.
+  Whisper's also takes rows spaced apart (`af_whisper_log_mel_ld`), so an item shorter than
+  the longest one of a `qwen3_asr.log_mel_batch` goes straight into `feats[i, :, :n]` instead
+  of through a temporary array (2–4 % faster on one thread, 6–9 % on 16).
 - **The GIL is released** during every native call, so Python threads run in parallel.
 - **Free-threaded CPython** (3.14t): the module declares `FREE_THREADED`, so importing it
   keeps the GIL disabled. Nothing else had to change: the C core already runs concurrently

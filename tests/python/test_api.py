@@ -59,12 +59,35 @@ def test_out_argument(sigs):
     np.testing.assert_array_equal(out, sv.fbank(audio))
 
 
+@pytest.mark.parametrize("pad_or_trim,n", [(False, 16000), (False, 333), (True, 16000)])
+def test_out_argument_row_stride(sigs, pad_or_trim, n):
+    """log_mel writes into rows spaced apart (a[:, :frames]) and leaves the rest alone."""
+    audio = sigs["speech"][:n]
+    fe = _ext.WhisperFrontend(pad_or_trim=pad_or_trim)
+    frames = fe.out_frames(n)
+    big = np.full((80, frames + 7), 5.0, np.float32)
+    assert fe.log_mel(audio, out=big[:, :frames]) is None
+    np.testing.assert_array_equal(big[:, :frames], fe.log_mel(audio))
+    assert (big[:, frames:] == 5.0).all()
+
+    sv = _ext.SenseVoiceFrontend()  # other outputs still need C-contiguous arrays
+    rows = np.empty((sv.out_frames(16000), sv.feat_dim + 1), np.float32)[:, :-1]
+    with pytest.raises(TypeError):
+        sv.fbank(sigs["speech"][:16000], out=rows)
+
+
 @pytest.mark.parametrize(
     "out,exc",
     [
         (np.empty((80, 2999), np.float32), ValueError),  # wrong shape
         (np.empty((80, 3000), np.float64), TypeError),  # wrong dtype: never converted
-        (np.empty((3000, 80), np.float32).T, TypeError),  # not C-contiguous
+        (np.empty((3000, 80), np.float32).T, ValueError),  # rows not contiguous
+        (
+            np.lib.stride_tricks.as_strided(
+                np.empty(80 * 3000, np.float32), (80, 3000), (4 * 2999, 4)
+            ),
+            ValueError,
+        ),  # overlapping rows
         (np.empty((80, 3000), np.float32), TypeError),  # read-only (set below)
     ],
 )

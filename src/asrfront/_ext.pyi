@@ -2,7 +2,8 @@
 
 Frontend objects are not thread-safe: use one per thread. Compute methods release the GIL.
 Inputs must be C-contiguous float32 1-D arrays; ``out`` must be a writable C-contiguous
-float32 array of the exact output shape (it is never converted or copied).
+float32 array of the exact output shape (it is never converted or copied);
+``WhisperFrontend.log_mel`` also takes rows spaced apart, e.g. ``a[:, :n]``.
 """
 
 from typing import Any, overload

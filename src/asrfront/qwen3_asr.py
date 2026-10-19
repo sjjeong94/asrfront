@@ -138,11 +138,8 @@ def log_mel_batch(
 
         def work(i: int, audio: np.ndarray) -> None:
             n = lengths[i]
-            if n == n_frames:  # writes straight into the (contiguous) row
-                _frontend().log_mel(audio, out=feats[i])
-                return
-            feats[i, :, :n] = _frontend().log_mel(audio)
-            if out is not None:
+            _frontend().log_mel(audio, out=feats[i, :, :n])  # rows of feats[i], no copy
+            if out is not None and n < n_frames:
                 feats[i, :, n:] = 0.0
 
     run_batch(work, items, n_threads)

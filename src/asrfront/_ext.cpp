@@ -24,6 +24,8 @@ using Audio = nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::device::cp
 using Vec = nb::ndarray<const float, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Out2D = nb::ndarray<nb::numpy, float, nb::ndim<2>, nb::c_contig>;
 using OutArg = std::optional<nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu>>;
+// Rows may be spaced apart (e.g. feats[i, :, :n] of a padded batch); elements contiguous.
+using OutRows = std::optional<nb::ndarray<float, nb::ndim<2>, nb::device::cpu>>;
 using Bytes = nb::ndarray<const uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Out1D = nb::ndarray<nb::numpy, float, nb::ndim<1>, nb::c_contig>;
 
@@ -100,11 +102,30 @@ struct Whisper {
     Whisper(const Whisper &) = delete;
     Whisper &operator=(const Whisper &) = delete;
 
-    nb::object log_mel(Audio audio, OutArg out) {
+    nb::object log_mel(Audio audio, OutRows out) {
         size_t n = audio.shape(0);
         size_t frames = af_whisper_out_frames(h, n);
-        return compute_into((size_t)n_mels, frames, out,
-                            [&](float *o) { return af_whisper_log_mel(h, audio.data(), n, o); });
+        if (!out)
+            return nb::cast(compute_2d((size_t)n_mels, frames, [&](float *o) {
+                return af_whisper_log_mel(h, audio.data(), n, o);
+            }));
+        if (out->shape(0) != (size_t)n_mels || out->shape(1) != frames)
+            throw nb::value_error(("out has shape (" + std::to_string(out->shape(0)) + ", " +
+                                   std::to_string(out->shape(1)) + "), expected (" +
+                                   std::to_string(n_mels) + ", " + std::to_string(frames) + ")")
+                                      .c_str());
+        // strides in elements: contiguous rows that do not overlap
+        const int64_t ld = out->stride(0);
+        if ((frames > 1 && out->stride(1) != 1) || ld < (int64_t)frames)
+            throw nb::value_error("out must have contiguous rows (e.g. a slice a[:, :n] of a "
+                                  "C-contiguous array)");
+        int rc;
+        {
+            nb::gil_scoped_release release;
+            rc = af_whisper_log_mel_ld(h, audio.data(), n, out->data(), (size_t)ld);
+        }
+        check(rc);
+        return nb::none();
     }
 
     nb::object log_mel_padded(Audio audio, size_t n_padded, OutArg out) {
@@ -272,8 +293,8 @@ NB_MODULE(_ext, m) {
             "n_samples"_a)
         .def("log_mel", &Whisper::log_mel, "audio"_a,
              nb::arg("out").none().noconvert() = nb::none(),
-             "Log-mel spectrogram (n_mels, out_frames). With `out`, writes into it and returns "
-             "None.")
+             "Log-mel spectrogram (n_mels, out_frames). With `out` (float32, contiguous rows, "
+             "e.g. a[:, :n] of a C-contiguous array), writes into it and returns None.")
         .def("log_mel_padded", &Whisper::log_mel_padded, "audio"_a, "n_padded"_a,
              nb::arg("out").none().noconvert() = nb::none(),
              "Log-mel spectrogram of `audio` followed by zeros up to `n_padded` samples, "
