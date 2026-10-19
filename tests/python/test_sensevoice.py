@@ -216,6 +216,18 @@ def test_load_cmvn_sees_file_changes(tmp_path):
     assert asrfront.sensevoice.load_cmvn(path)[0].tolist() == [2, 2, 2, 2, 2]
 
 
+def test_fbank_cmvn_path_sees_file_changes(sigs, tmp_path):
+    path = tmp_path / "am.mvn"
+    first, second = _synthetic_cmvn(), (np.zeros(560, np.float32), np.ones(560, np.float32))
+    for shift, scale in (first, second, first):
+        _write_am_mvn(path, shift, scale)
+        os.utime(path, ns=(0, path.stat().st_mtime_ns + 10**9))  # new mtime even on coarse clocks
+        np.testing.assert_array_equal(
+            asrfront.sensevoice.fbank(sigs["speech"], cmvn=path),
+            asrfront.sensevoice.fbank(sigs["speech"], cmvn=(shift, scale)),
+        )
+
+
 @pytest.mark.parametrize(
     "text,match",
     [

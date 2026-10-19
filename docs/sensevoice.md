@@ -222,7 +222,10 @@ repeated 7 times (shift −15.05 … −8.31, scale 0.144 … 0.156), so the res
 
 `asrfront.sensevoice.load_cmvn(path)` implements the same parser (with errors for malformed
 files), and `fbank(..., cmvn=path_or_(shift, scale))` applies it. If the vectors are longer
-than `n_mels · lfr_m`, only the first entries are used, as in FunASR.
+than `n_mels · lfr_m`, only the first entries are used, as in FunASR. A path is parsed and
+validated once per file version (device, inode, mtime, size), so a call with a path costs one
+`stat` more than one without CMVN (about 78 → 57 µs for a 1 s input; 51 µs without CMVN), and
+edits to the file are picked up.
 
 ## Dither
 

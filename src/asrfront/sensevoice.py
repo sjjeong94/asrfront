@@ -7,7 +7,7 @@ import math
 import os
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, NamedTuple, Union
 
 import numpy as np
 
@@ -56,15 +56,15 @@ def _load_cmvn_cached(path: str, _mtime_ns: int, _size: int) -> Cmvn:
     return shift, scale
 
 
-def _resolve_cmvn(cmvn: CmvnLike | None, dim: int) -> Cmvn | None:
-    if cmvn is None:
-        return None
-    if isinstance(cmvn, (str, os.PathLike)):
-        cmvn = load_cmvn(cmvn)
-    try:
-        shift, scale = cmvn
-    except (TypeError, ValueError):
-        raise TypeError("cmvn must be a path to am.mvn or a (shift, scale) pair") from None
+class _Cmvn(NamedTuple):
+    """Validated CMVN vectors (``dim`` values each) and their handle-cache key."""
+
+    shift: np.ndarray
+    scale: np.ndarray
+    key: tuple[bytes, bytes]
+
+
+def _validate_cmvn(shift: Any, scale: Any, dim: int) -> _Cmvn:
     shift = np.ascontiguousarray(shift, dtype=np.float32).ravel()
     scale = np.ascontiguousarray(scale, dtype=np.float32).ravel()
     if shift.size < dim or scale.size < dim:
@@ -76,17 +76,40 @@ def _resolve_cmvn(cmvn: CmvnLike | None, dim: int) -> Cmvn | None:
         if not np.isfinite(v).all():
             bad = int(np.flatnonzero(~np.isfinite(v))[0])
             raise ValueError(f"cmvn {name} contains NaN or inf (first at index {bad})")
-    return shift, scale
+    return _Cmvn(shift, scale, (shift.tobytes(), scale.tobytes()))
+
+
+@functools.lru_cache(maxsize=16)
+def _cmvn_file(path: str, _dev: int, _ino: int, _mtime_ns: int, _size: int, dim: int) -> _Cmvn:
+    """am.mvn parsed and validated once per file version."""
+    c = _validate_cmvn(*_load_cmvn_cached(str(Path(path).resolve()), _mtime_ns, _size), dim)
+    c.shift.flags.writeable = c.scale.flags.writeable = False  # shared by later calls
+    return c
+
+
+def _resolve_cmvn(cmvn: CmvnLike | None, dim: int) -> _Cmvn | None:
+    if cmvn is None:
+        return None
+    if isinstance(cmvn, (str, os.PathLike)):
+        # one stat per call: a path is as cheap as passing the vectors, and edits are seen
+        path = os.fspath(cmvn)
+        st = os.stat(path)
+        return _cmvn_file(os.fsdecode(path), st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size, dim)
+    try:
+        shift, scale = cmvn
+    except (TypeError, ValueError):
+        raise TypeError("cmvn must be a path to am.mvn or a (shift, scale) pair") from None
+    return _validate_cmvn(shift, scale, dim)
 
 
 def _frontend(
-    n_mels: int, lfr_m: int, lfr_n: int, cmvn: Cmvn | None, dither: float, seed: int
+    n_mels: int, lfr_m: int, lfr_n: int, cmvn: _Cmvn | None, dither: float, seed: int
 ) -> _ext.SenseVoiceFrontend:
-    """``cmvn`` must already be resolved by :func:`_resolve_cmvn`."""
+    """``cmvn`` comes from :func:`_resolve_cmvn`."""
     if dither == 0.0:
         seed = 0  # the RNG is unused: one cached handle for every seed
-    shift, scale = cmvn if cmvn is not None else (None, None)
-    cmvn_key = None if cmvn is None else (cmvn[0].tobytes(), cmvn[1].tobytes())
+    shift, scale = (cmvn.shift, cmvn.scale) if cmvn is not None else (None, None)
+    cmvn_key = None if cmvn is None else cmvn.key
     return cached_frontend(
         ("sensevoice", n_mels, lfr_m, lfr_n, cmvn_key, dither, seed),
         lambda: _ext.SenseVoiceFrontend(
