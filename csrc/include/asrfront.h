@@ -127,12 +127,15 @@ typedef enum {
  * *n_samples is set; on error *out is NULL. */
 int af_load_memory(const void *buf, size_t size, af_raw_mode raw, float **out, size_t *n_samples);
 
-/* As af_load_memory, failing with AF_ETOOLONG when the output would have more than
+/* As af_load_memory, with two additions. err (may be NULL) receives a NUL-terminated ASCII
+ * description of an AF_EUNSUPPORTED / AF_ECORRUPT failure, such as "WAV: format tag 0x0055
+ * (MP3)" or "FLAC" when only the container is known (empty otherwise; 128 bytes are enough).
+ * And it fails with AF_ETOOLONG when the output would have more than
  * max_samples samples (0: no limit). Checked from the decoded frame count before the samples
  * are allocated (PCM and ADPCM codecs) or while decoding (FLAC, MP3, stopping one frame past
  * the limit), so a small file that would decode to gigabytes fails early. */
 int af_load_memory_ex(const void *buf, size_t size, af_raw_mode raw, size_t max_samples,
-                      float **out, size_t *n_samples);
+                      float **out, size_t *n_samples, char *err, size_t err_size);
 
 /* Same for a file (UTF-8 path). `.pcm` / `.raw` extensions select AF_RAW_FORCE,
  * anything else AF_RAW_NEVER. */

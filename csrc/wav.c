@@ -33,7 +33,35 @@ typedef struct {
     uint32_t sample_rate, mask, block_align;
 } wav_fmt;
 
-static int parse_fmt(const uint8_t *body, uint64_t size, wav_fmt *f) {
+/* Names of format tags seen in the wild that ffmpeg (or nothing here) decodes. */
+static const char *tag_name(int tag) {
+    switch (tag) {
+    case 0x0031:
+        return " (GSM 6.10)";
+    case 0x0050:
+        return " (MPEG)";
+    case 0x0055:
+        return " (MP3)";
+    case 0x00FF:
+    case 0x1610:
+        return " (AAC)";
+    case 0x0160:
+    case 0x0161:
+    case 0x0162:
+    case 0x0163:
+        return " (WMA)";
+    case 0x2000:
+        return " (AC-3)";
+    case 0x6750:
+        return " (Vorbis)";
+    case 0xF1AC:
+        return " (FLAC)";
+    default:
+        return "";
+    }
+}
+
+static int parse_fmt(const uint8_t *body, uint64_t size, wav_fmt *f, af_decoded *out) {
     if (size < 16)
         return AF_ECORRUPT;
     f->tag = rd16(body);
@@ -51,28 +79,34 @@ static int parse_fmt(const uint8_t *body, uint64_t size, wav_fmt *f) {
     if (f->channels <= 0 || f->sample_rate == 0 || f->sample_rate > 0x7FFFFFFF)
         return AF_ECORRUPT;
     if (f->channels > AF_MAX_CHANNELS)
-        return AF_EUNSUPPORTED;
+        return af_fail(out, AF_EUNSUPPORTED, "%d channels (at most %d)", f->channels,
+                       AF_MAX_CHANNELS);
     const uint32_t ch = (uint32_t)f->channels;
     switch (f->tag) {
     case WAV_TAG_PCM:
-        return f->bits == 8 || f->bits == 16 || f->bits == 24 || f->bits == 32 ? AF_OK
-                                                                               : AF_EUNSUPPORTED;
+        return f->bits == 8 || f->bits == 16 || f->bits == 24 || f->bits == 32
+                   ? AF_OK
+                   : af_fail(out, AF_EUNSUPPORTED, "%d-bit PCM", f->bits);
     case WAV_TAG_FLOAT:
-        return f->bits == 32 || f->bits == 64 ? AF_OK : AF_EUNSUPPORTED;
+        return f->bits == 32 || f->bits == 64
+                   ? AF_OK
+                   : af_fail(out, AF_EUNSUPPORTED, "%d-bit float", f->bits);
     case WAV_TAG_ALAW:
     case WAV_TAG_MULAW:
-        return f->bits == 8 ? AF_OK : AF_EUNSUPPORTED;
+        return f->bits == 8 ? AF_OK : af_fail(out, AF_EUNSUPPORTED, "%d-bit G.711", f->bits);
     case WAV_TAG_IMA_ADPCM: /* per channel: a 4-byte header, then groups of 4 bytes */
-        if (f->bits != 4)
-            return AF_EUNSUPPORTED; /* 2/3/5-bit IMA variants */
+        if (f->bits != 4)   /* 2/3/5-bit IMA variants */
+            return af_fail(out, AF_EUNSUPPORTED, "%d-bit IMA ADPCM", f->bits);
         return f->block_align >= 4 * ch && (f->block_align - 4 * ch) % (4 * ch) == 0 ? AF_OK
                                                                                      : AF_ECORRUPT;
     case WAV_TAG_MS_ADPCM: /* ffmpeg decodes it for one or two channels only */
         if (ch > 2)
-            return AF_EUNSUPPORTED;
+            return af_fail(out, AF_EUNSUPPORTED, "MS ADPCM with %d channels (at most 2)",
+                           f->channels);
         return f->block_align >= 7 * ch ? AF_OK : AF_ECORRUPT;
     default:
-        return AF_EUNSUPPORTED;
+        return af_fail(out, AF_EUNSUPPORTED, "format tag 0x%04X%s", (unsigned)f->tag,
+                       tag_name(f->tag));
     }
 }
 
@@ -141,7 +175,7 @@ int af_wav_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
         if (ck_size > avail)
             return AF_ECORRUPT;
         if (memcmp(ck, "fmt ", 4) == 0) {
-            int rc = parse_fmt(body, ck_size, &fmt);
+            int rc = parse_fmt(body, ck_size, &fmt, out);
             if (rc != AF_OK)
                 return rc;
             have_fmt = 1;
@@ -195,7 +229,7 @@ int af_w64_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
         if (body_size > avail)
             return AF_ECORRUPT;
         if (w64_id(ck, "fmt ")) {
-            int rc = parse_fmt(body, body_size, &fmt);
+            int rc = parse_fmt(body, body_size, &fmt, out);
             if (rc != AF_OK)
                 return rc;
             have_fmt = 1;

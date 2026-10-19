@@ -125,7 +125,8 @@ int af_caf_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
     if (!(rate >= 1.0) || channels == 0 || channels > 0x7FFFFFFF)
         return AF_ECORRUPT;
     if (channels > AF_MAX_CHANNELS)
-        return AF_EUNSUPPORTED;
+        return af_fail(out, AF_EUNSUPPORTED, "%u channels (at most %d)", (unsigned)channels,
+                       AF_MAX_CHANNELS);
     out->channels = (int)channels;
     /* truncated to an integer, like ffmpeg; anything this large is rejected by the resampler */
     out->sample_rate = rate < 2147483647.0 ? (int)rate : 2147483647;
@@ -144,7 +145,7 @@ int af_caf_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
             else if (bits == 64)
                 codec = le ? AF_PCM_F64LE : AF_PCM_F64BE;
             else
-                return AF_EUNSUPPORTED;
+                return af_fail(out, AF_EUNSUPPORTED, "%u-bit float", (unsigned)bits);
         } else if (bits >= 1 && bits <= 8) {
             codec = AF_PCM_S8;
         } else if (bits >= 9 && bits <= 16) {
@@ -154,7 +155,7 @@ int af_caf_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
         } else if (bits >= 25 && bits <= 32) {
             codec = le ? AF_PCM_S32LE : AF_PCM_S32BE;
         } else {
-            return AF_EUNSUPPORTED;
+            return af_fail(out, AF_EUNSUPPORTED, "%u-bit PCM", (unsigned)bits);
         }
     } else if (memcmp(format, "alaw", 4) == 0) {
         codec = AF_PCM_ALAW;
@@ -165,7 +166,7 @@ int af_caf_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
             return AF_ECORRUPT;
         ima4 = 1;
     } else {
-        return AF_EUNSUPPORTED;
+        return af_fail(out, AF_EUNSUPPORTED, "format '%.4s'", (const char *)format);
     }
 
     const uint8_t *chan = NULL, *data = NULL;

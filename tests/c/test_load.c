@@ -233,15 +233,16 @@ static void test_limit(void) {
     put(&w, "data\x20\0\0\0", 8);
     for (int i = 0; i < 32; i++)
         put(&w, "\x11", 1); /* 8 stereo frames */
-    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 8, &a, &n) == AF_OK && n == 8);
+    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 8, &a, &n, NULL, 0) == AF_OK && n == 8);
     af_audio_free(a);
-    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 0, &a, &n) == AF_OK && n == 8);
+    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 0, &a, &n, NULL, 0) == AF_OK && n == 8);
     af_audio_free(a);
-    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 7, &a, &n) == AF_ETOOLONG && !a && n == 0);
-    CHECK(af_load_memory_ex(w.b, 44 + 28, AF_RAW_NEVER, 7, &a, &n) == AF_OK && n == 7);
+    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 7, &a, &n, NULL, 0) == AF_ETOOLONG && !a &&
+          n == 0);
+    CHECK(af_load_memory_ex(w.b, 44 + 28, AF_RAW_NEVER, 7, &a, &n, NULL, 0) == AF_OK && n == 7);
     af_audio_free(a);
     const uint8_t pcm[6] = {0};
-    CHECK(af_load_memory_ex(pcm, 6, AF_RAW_FORCE, 2, &a, &n) == AF_ETOOLONG);
+    CHECK(af_load_memory_ex(pcm, 6, AF_RAW_FORCE, 2, &a, &n, NULL, 0) == AF_ETOOLONG);
     CHECK(strcmp(af_strerror(AF_ETOOLONG), "audio longer than the limit") == 0);
 
     /* af_resample_max_in is the exact inverse of af_resampler_out_len */
@@ -259,6 +260,55 @@ static void test_limit(void) {
         af_resampler_destroy(r);
     }
     CHECK(af_resample_max_in(384000, 16000, SIZE_MAX / 2) == SIZE_MAX); /* no overflow */
+}
+
+/* af_load_memory_ex's error description: what is not supported, or which container is broken */
+static void expect_err(const void *b, size_t n, af_raw_mode raw, int want_rc, const char *want) {
+    float *a = NULL;
+    size_t len = 0;
+    char err[128];
+    int rc = af_load_memory_ex(b, n, raw, 0, &a, &len, err, sizeof err);
+    if (rc != want_rc || strcmp(err, want) != 0) {
+        fprintf(stderr, "error description: rc %d, \"%s\"; want rc %d, \"%s\"\n", rc, err, want_rc,
+                want);
+        failures++;
+    }
+    af_audio_free(a);
+}
+
+static void test_error_details(void) {
+    buf_t w;
+    wav_head(&w, 0x55, 2, 44100, 0, 0);
+    put(&w, "data\x04\0\0\0\0\0\0\0", 12);
+    expect_err(w.b, w.n, AF_RAW_NEVER, AF_EUNSUPPORTED, "WAV: format tag 0x0055 (MP3)");
+    wav_head(&w, 1, 1, 16000, 12, 0);
+    put(&w, "data\x04\0\0\0\0\0\0\0", 12);
+    expect_err(w.b, w.n, AF_RAW_NEVER, AF_EUNSUPPORTED, "WAV: 12-bit PCM");
+    wav_head(&w, 1, 1, 500, 16, 0);
+    put(&w, "data\x04\0\0\0\0\0\0\0", 12);
+    expect_err(w.b, w.n, AF_RAW_NEVER, AF_EUNSUPPORTED,
+               "WAV: sample rate 500 Hz (1000 to 384000 supported)");
+    wav_head(&w, 1, 10, 16000, 16, 0);
+    put(&w, "data\x14\0\0\0", 8);
+    for (int i = 0; i < 20; i++)
+        put(&w, "\0", 1);
+    expect_err(w.b, w.n, AF_RAW_NEVER, AF_EUNSUPPORTED,
+               "WAV: 10 channels without a channel mask (at most 8)");
+    expect_err(w.b, 30, AF_RAW_NEVER, AF_ECORRUPT, "WAV"); /* truncated header */
+    expect_err("not audio", 9, AF_RAW_NEVER, AF_EUNSUPPORTED, "no known container header");
+    expect_err("\0\0\0 ftypM4A ", 12, AF_RAW_NEVER, AF_EUNSUPPORTED, "MP4 / M4A container");
+    expect_err("OggS\0\2", 6, AF_RAW_NEVER, AF_EUNSUPPORTED, "Ogg (Vorbis / Opus) container");
+    expect_err("fLaC\0\0\0\x22", 8, AF_RAW_AUTO, AF_ECORRUPT, "FLAC");
+    /* bytes from the file are sanitized to printable ASCII */
+    uint8_t caf[64] = "caff\0\1\0\0desc\0\0\0\0\0\0\0\x20";
+    memcpy(caf + 20, "\x40\xCF\x40\0\0\0\0\0", 8); /* 16000.0 */
+    memcpy(caf + 28, "\x01\xFFxy", 4);             /* format */
+    caf[47] = 1;                                   /* channels */
+    expect_err(caf, sizeof caf, AF_RAW_NEVER, AF_EUNSUPPORTED, "CAF: format '??xy'");
+    /* success and other codes leave it empty */
+    wav_head(&w, 1, 1, 16000, 16, 0);
+    put(&w, "data\x04\0\0\0\0\0\0\0", 12);
+    expect_err(w.b, w.n, AF_RAW_NEVER, AF_OK, "");
 }
 
 static void test_raw_and_detection(void) {
@@ -608,6 +658,7 @@ int main(void) {
     test_wav_errors();
     test_raw_and_detection();
     test_limit();
+    test_error_details();
     test_layouts();
     test_aiff();
     test_caf();

@@ -100,7 +100,8 @@ int af_sphere_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *
     if (channels <= 0 || rate <= 0)
         return AF_ECORRUPT;
     if (channels > AF_MAX_CHANNELS)
-        return AF_EUNSUPPORTED;
+        return af_fail(out, AF_EUNSUPPORTED, "%ld channels (at most %d)", channels,
+                       AF_MAX_CHANNELS);
 
     af_pcm_codec codec;
     if (lower_eq(coding, "pcm")) {
@@ -112,16 +113,18 @@ int af_sphere_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *
             else if (strcmp(byte_format, "10") == 0)
                 codec = AF_PCM_S16BE;
             else
-                return AF_EUNSUPPORTED;
-        } else {
-            return n_bytes <= 0 ? AF_ECORRUPT : AF_EUNSUPPORTED; /* 3/4 bytes: not in ffmpeg */
+                return af_fail(out, AF_EUNSUPPORTED, "sample_byte_format %s", byte_format);
+        } else if (n_bytes <= 0) {
+            return AF_ECORRUPT;
+        } else { /* 3/4 bytes: not in ffmpeg */
+            return af_fail(out, AF_EUNSUPPORTED, "%ld-byte PCM", n_bytes);
         }
     } else if (lower_eq(coding, "ulaw") || lower_eq(coding, "mu-law")) {
         codec = AF_PCM_MULAW; /* one byte per sample whatever sample_n_bytes says */
     } else if (lower_eq(coding, "alaw")) {
         codec = AF_PCM_ALAW;
-    } else {
-        return AF_EUNSUPPORTED; /* e.g. "pcm,embedded-shorten-v2.00" */
+    } else { /* e.g. "pcm,embedded-shorten-v2.00" */
+        return af_fail(out, AF_EUNSUPPORTED, "sample_coding %s", coding);
     }
 
     out->channels = (int)channels;

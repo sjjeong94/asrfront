@@ -52,7 +52,8 @@ SenseVoiceSmall expect — the same as `whisper.load_audio(path)`, i.e.
   - NIST SPHERE (TIMIT-style corpora): 8/16-bit PCM, A-law/µ-law (not shorten-compressed)
   - FLAC, MP3
 - not supported (→ `ValueError`; convert with ffmpeg first): AAC/M4A, Opus, Vorbis, WMA, video
-  containers, big-endian RIFX WAV
+  containers, big-endian RIFX WAV. The error names the reason, e.g. `unsupported audio format
+  (WAV: format tag 0x0055 (MP3))` or `(MP4 / M4A container)`
 - input rates 1 kHz – 384 kHz, any channel layout up to 8 channels (18 with a WAV channel mask)
 - all formats but MP3: bit-identical to ffmpeg 7.0.2 at all common rates; MP3 (different
   decoder): within 1/32768, same length. Details and the few documented deviations:

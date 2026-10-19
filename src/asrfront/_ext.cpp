@@ -223,12 +223,15 @@ NB_MODULE(_ext, m) {
         [](Bytes data, int raw, size_t max_samples) {
             float *buf = nullptr;
             size_t n = 0;
+            char err[128];
             int rc;
             {
                 nb::gil_scoped_release release;
                 rc = af_load_memory_ex(data.data(), data.shape(0), (af_raw_mode)raw, max_samples,
-                                       &buf, &n);
+                                       &buf, &n, err, sizeof err);
             }
+            if (rc != AF_OK && err[0])
+                throw nb::value_error((std::string(af_strerror(rc)) + " (" + err + ")").c_str());
             check(rc);
             nb::capsule owner(buf,
                               [](void *p) noexcept { af_audio_free(static_cast<float *>(p)); });

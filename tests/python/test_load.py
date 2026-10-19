@@ -135,6 +135,23 @@ def test_max_duration_values(tmp_path):
     assert len(asrfront.load(b"", max_duration=1)) == 0
 
 
+def test_error_details(tmp_path):
+    """Errors say what is unsupported (or which container is broken) and list what is."""
+    wav = write_wav(tmp_path / "a.wav", noise_s16(100)).read_bytes()
+    mp3_in_wav = wav[:20] + struct.pack("<H", 0x55) + wav[22:]
+    with pytest.raises(
+        ValueError,
+        match=r"unsupported audio format \(WAV: format tag 0x0055 "
+        r"\(MP3\)\); supported: WAV",
+    ):
+        asrfront.load(mp3_in_wav)
+    with pytest.raises(ValueError, match=r"'.*x\.wav': unsupported audio format \(no known "):
+        (tmp_path / "x.wav").write_bytes(b"not audio at all")
+        asrfront.load(tmp_path / "x.wav")
+    with pytest.raises(ValueError, match=r"malformed or truncated audio file \(WAV\)"):
+        asrfront.load(wav[:30])
+
+
 def test_errors(tmp_path):
     with pytest.raises(FileNotFoundError):
         asrfront.load(tmp_path / "missing.wav")

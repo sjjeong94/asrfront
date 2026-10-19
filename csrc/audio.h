@@ -46,8 +46,17 @@ typedef struct af_decoded {
     uint32_t layout[AF_MAX_CHANNELS]; /* position bit per channel */
     size_t n_frames;
     void *data;
-    size_t limit; /* the caller's limit in 16 kHz samples (0: none); see af_frame_limit */
+    size_t limit;    /* the caller's limit in 16 kHz samples (0: none); see af_frame_limit */
+    char detail[96]; /* why decoding failed, if known (af_fail) */
 } af_decoded;
+
+/* Record why decoding failed (printf-style, e.g. "format tag 0x0055"; bytes outside printable
+ * ASCII become '?') and return rc. */
+int af_fail(af_decoded *d, int rc, const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 3, 4)))
+#endif
+    ;
 
 void af_decoded_free(af_decoded *d);
 /* Most frames at d->sample_rate that resample to at most d->limit samples at 16 kHz

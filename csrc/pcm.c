@@ -1,5 +1,7 @@
 /* Uncompressed sample codecs shared by the containers (PCM of any byte order, IEEE float,
  * G.711), and headerless raw PCM. */
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -39,6 +41,17 @@ static int16_t mulaw_to_s16(uint8_t u) {
     u = (uint8_t)~u;
     int t = (((u & 0x0F) << 3) + 0x84) << ((u >> 4) & 7);
     return (int16_t)((u & 0x80) ? (0x84 - t) : (t - 0x84));
+}
+
+int af_fail(af_decoded *d, int rc, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(d->detail, sizeof d->detail, fmt, ap);
+    va_end(ap);
+    for (char *c = d->detail; *c; c++) /* file contents may be anything; keep it ASCII */
+        if ((unsigned char)*c < 0x20 || (unsigned char)*c > 0x7E)
+            *c = '?';
+    return rc;
 }
 
 void af_decoded_free(af_decoded *d) {

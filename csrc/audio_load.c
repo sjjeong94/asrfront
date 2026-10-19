@@ -9,6 +9,7 @@
 
 #include "asrfront.h"
 #include "audio.h"
+#include "resample.h"
 
 typedef enum {
     FMT_UNKNOWN,
@@ -88,11 +89,60 @@ static container detect(const uint8_t *buf, size_t size) {
 }
 
 int af_load_memory(const void *buf, size_t size, af_raw_mode raw, float **out, size_t *n_samples) {
-    return af_load_memory_ex(buf, size, raw, 0, out, n_samples);
+    return af_load_memory_ex(buf, size, raw, 0, out, n_samples, NULL, 0);
+}
+
+static const char *const container_names[] = {
+    "raw PCM", "WAV", "Wave64", "AIFF", "CAF", "NIST SPHERE", "FLAC", "MP3",
+};
+
+/* Common containers that are not decoded, named in the error instead of "no known header". */
+static const char *unsupported_container(const uint8_t *buf, size_t size) {
+    if (size >= 8 && memcmp(buf + 4, "ftyp", 4) == 0)
+        return "MP4 / M4A";
+    if (size >= 4 && memcmp(buf, "OggS", 4) == 0)
+        return "Ogg (Vorbis / Opus)";
+    if (size >= 4 && memcmp(buf, "\x1A\x45\xDF\xA3", 4) == 0)
+        return "Matroska / WebM";
+    if (size >= 4 && memcmp(buf, "\x30\x26\xB2\x75", 4) == 0)
+        return "ASF / WMA";
+    if (size >= 4 && memcmp(buf, "RIFX", 4) == 0)
+        return "big-endian RIFX WAV";
+    if (size >= 2 && buf[0] == 0xFF && (buf[1] & 0xF6) == 0xF0)
+        return "AAC (ADTS)";
+    return NULL;
+}
+
+/* "<container>: <why>" for a failed load into err (container alone if the reason is unknown). */
+static void describe(int rc, container fmt, const uint8_t *buf, size_t size, int raw_never,
+                     const af_decoded *d, char *err, size_t err_size) {
+    if (!err || err_size == 0)
+        return;
+    const char *name = container_names[fmt];
+    if (raw_never) {
+        const char *other = unsupported_container(buf, size);
+        if (other)
+            snprintf(err, err_size, "%s container", other);
+        else
+            snprintf(err, err_size, "no known container header");
+    } else if (d->detail[0]) {
+        snprintf(err, err_size, "%s: %s", name, d->detail);
+    } else if (rc == AF_EUNSUPPORTED && d->channels > 8) { /* no layout for the channel count */
+        snprintf(err, err_size, "%s: %d channels without a channel mask (at most 8)", name,
+                 d->channels);
+    } else if (rc == AF_EUNSUPPORTED && d->sample_rate > 0 &&
+               (d->sample_rate < AF_RESAMPLE_MIN_RATE || d->sample_rate > AF_RESAMPLE_MAX_RATE)) {
+        snprintf(err, err_size, "%s: sample rate %d Hz (%d to %d supported)", name, d->sample_rate,
+                 AF_RESAMPLE_MIN_RATE, AF_RESAMPLE_MAX_RATE);
+    } else {
+        snprintf(err, err_size, "%s", name);
+    }
 }
 
 int af_load_memory_ex(const void *buf_, size_t size, af_raw_mode raw, size_t max_samples,
-                      float **out, size_t *n_samples) {
+                      float **out, size_t *n_samples, char *err, size_t err_size) {
+    if (err && err_size > 0)
+        err[0] = 0;
     if (!out || !n_samples || (!buf_ && size > 0))
         return AF_EINVAL;
     *out = NULL;
@@ -102,6 +152,7 @@ int af_load_memory_ex(const void *buf_, size_t size, af_raw_mode raw, size_t max
     const uint8_t *buf = buf_ ? buf_ : (const uint8_t *)"";
 
     af_decoded d;
+    memset(&d, 0, sizeof d);
     int rc;
     container fmt = raw == AF_RAW_FORCE ? FMT_UNKNOWN : detect(buf, size);
     switch (fmt) {
@@ -127,16 +178,19 @@ int af_load_memory_ex(const void *buf_, size_t size, af_raw_mode raw, size_t max
         rc = af_mp3_decode(buf, size, max_samples, &d);
         break;
     default:
-        if (raw == AF_RAW_NEVER)
+        if (raw == AF_RAW_NEVER) {
+            describe(AF_EUNSUPPORTED, fmt, buf, size, 1, &d, err, err_size);
             return AF_EUNSUPPORTED;
+        }
         rc = af_pcm_decode_raw(buf, size, max_samples, &d);
         break;
     }
-    if (rc != AF_OK)
-        return rc;
-
-    rc = af_audio_to_mono(&d, AF_SAMPLE_RATE, out, n_samples);
-    af_decoded_free(&d);
+    if (rc == AF_OK) {
+        rc = af_audio_to_mono(&d, AF_SAMPLE_RATE, out, n_samples);
+        af_decoded_free(&d);
+    }
+    if (rc == AF_EUNSUPPORTED || rc == AF_ECORRUPT)
+        describe(rc, fmt, buf, size, 0, &d, err, err_size);
     return rc;
 }
 

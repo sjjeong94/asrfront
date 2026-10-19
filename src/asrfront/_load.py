@@ -78,11 +78,11 @@ def _decode(data: np.ndarray, raw: int, limit: int, what: str, max_duration: obj
     try:
         return _ext.load_memory(data, raw, limit)
     except ValueError as e:
-        if str(e) == _TOO_LONG:
+        if str(e).startswith(_TOO_LONG):
             raise ValueError(
                 f"{what}: audio is longer than max_duration={max_duration} s"
             ) from None
-        raise ValueError(f"{what}: {e} (supported: {_SUPPORTED})") from None
+        raise ValueError(f"{what}: {e}; supported: {_SUPPORTED}") from None
 
 
 def _as_bytes(source: object) -> np.ndarray:

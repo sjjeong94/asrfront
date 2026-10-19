@@ -94,7 +94,7 @@ int af_aiff_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
     if (channels <= 0 || rate == 0)
         return AF_ECORRUPT;
     if (channels > AF_MAX_CHANNELS)
-        return AF_EUNSUPPORTED;
+        return af_fail(out, AF_EUNSUPPORTED, "%d channels (at most %d)", channels, AF_MAX_CHANNELS);
     out->channels = channels;
     out->sample_rate = (int)rate;
     int rc = chan ? af_coreaudio_layout(chan, chan_size, channels, out->layout)
@@ -107,7 +107,7 @@ int af_aiff_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
     if (!aifc || has_id(comp, "NONE", "none") || memcmp(comp, "twos", 4) == 0) {
         rc = pcm_by_bits(bits, &codec);
         if (rc != AF_OK)
-            return rc;
+            return af_fail(out, rc, "%d-bit PCM", bits);
     } else if (memcmp(comp, "sowt", 4) == 0) {
         codec = AF_PCM_S16LE;
     } else if (memcmp(comp, "raw ", 4) == 0) {
@@ -127,7 +127,7 @@ int af_aiff_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
     } else if (memcmp(comp, "ima4", 4) == 0) {
         return af_adpcm_ima_qt(out, data, data_size);
     } else {
-        return AF_EUNSUPPORTED;
+        return af_fail(out, AF_EUNSUPPORTED, "compression '%.4s'", (const char *)comp);
     }
     return af_pcm_decode_frames(out, codec, data, data_size);
 }

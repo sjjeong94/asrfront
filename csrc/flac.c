@@ -60,7 +60,7 @@ int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
     if (ch < 1 || ch > 8 || f->sampleRate == 0 || f->sampleRate > 0x7FFFFFFF || bps < 4 ||
         bps > 32) {
         drflac_close(f);
-        return ch > 8 ? AF_EUNSUPPORTED : AF_ECORRUPT;
+        return ch > 8 ? af_fail(out, AF_EUNSUPPORTED, "%d channels (at most 8)", ch) : AF_ECORRUPT;
     }
     out->channels = ch;
     out->sample_rate = (int)f->sampleRate;
