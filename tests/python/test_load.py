@@ -616,6 +616,19 @@ def test_max_duration_compressed(tmp_path, ext):
             asrfront.load(path, max_duration=d)
 
 
+@pytest.mark.parametrize("frac", [0.3, 0.5, 0.8])
+def test_damaged_flac_frames_skipped(tmp_path, frac):
+    """A damaged FLAC frame is dropped and decoding goes on (like ffmpeg): no error, and the
+    audio after it is kept rather than truncated."""
+    path = ffmpeg_write(tmp_path / "a.flac", signal(16000 * 20, 2, 3), "flac", sr=44100)
+    data = bytearray(path.read_bytes())
+    full = len(asrfront.load(bytes(data)))
+    i = int(len(data) * frac)
+    data[i : i + 64] = bytes(b ^ 0xA5 for b in data[i : i + 64])
+    y = asrfront.load(bytes(data))
+    assert full - 3 * 1672 <= len(y) < full and np.all(np.isfinite(y))  # 4608-frame blocks
+
+
 @pytest.mark.parametrize("ext", ["flac", "mp3"])
 def test_truncated_compressed(tmp_path, ext):
     """Truncated files decode a prefix (or fail cleanly) instead of crashing."""

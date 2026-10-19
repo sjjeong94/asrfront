@@ -226,6 +226,10 @@ equal ffmpeg's; what matters is the sample format and layout ffmpeg assigns:
   5: FL FR FC BL BR, 6: FL FR FC LFE BL BR, 7: FL FR FC LFE BC SL SR, 8: FL FR FC LFE BL BR SL SR),
   overridden by a Vorbis comment `WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x…` — ffmpeg writes it
   whenever the layout differs from FLAC's (e.g. 2.1, 4.0) and applies it when decoding.
+- damaged frames (CRC mismatch, broken sync) are skipped and decoding goes on to the end, as in
+  ffmpeg, not an error and not a truncation. How much is dropped around the damage differs:
+  64 corrupted bytes in a 7 s 44.1 kHz stereo file lost 1–2 frames (1672–3344 output samples)
+  with dr_flac, 3 frames (5016) with ffmpeg. Damaged files only.
 
 ### MP3 (E)
 
