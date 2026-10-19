@@ -68,7 +68,10 @@ def _max_samples(max_duration: object) -> int:
         raise ValueError(f"max_duration must be finite and > 0, got {max_duration!r}")
     # at least one sample (0 means no limit), at most what size_t holds; + 1e-6 so that
     # n / 16000 seconds, which may round to just below n samples, still allows n
-    return max(1, min(math.floor(d * SAMPLE_RATE + 1e-6), 2**32 - 1 if _SIZE_T_32 else 2**63))
+    limit = 2**32 - 1 if _SIZE_T_32 else 2**63
+    if d >= limit / SAMPLE_RATE:  # cap seconds before multiplying: a finite d can overflow
+        return limit
+    return max(1, min(math.floor(d * SAMPLE_RATE + 1e-6), limit))
 
 
 _SIZE_T_32 = np.dtype(np.uintp).itemsize == 4

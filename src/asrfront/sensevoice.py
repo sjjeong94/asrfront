@@ -29,14 +29,19 @@ def load_cmvn(path: str | os.PathLike[str]) -> Cmvn:
     ``<LearnRateCoef> 0 [ v1 v2 ... ]`` line; features are normalized as
     ``(x + shift) * scale``.
     """
-    p = Path(path)
-    st = p.stat()
-    shift, scale = _load_cmvn_cached(str(p.resolve()), st.st_mtime_ns, st.st_size)
+    shift, scale = _load_cmvn_cached(*_cmvn_file_key(path))
     return shift.copy(), scale.copy()
 
 
+def _cmvn_file_key(path: str | os.PathLike[str]) -> tuple[str, int, int, int, int]:
+    """Use the same path and file identity in both CMVN caches, with one stat call."""
+    p = os.fsdecode(path)
+    st = os.stat(p)
+    return p, st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size
+
+
 @functools.lru_cache(maxsize=16)
-def _load_cmvn_cached(path: str, _mtime_ns: int, _size: int) -> Cmvn:
+def _load_cmvn_cached(path: str, _dev: int, _ino: int, _mtime_ns: int, _size: int) -> Cmvn:
     lines = Path(path).read_text(encoding="utf-8").splitlines()
     vectors: dict[str, np.ndarray] = {}
     for i, line in enumerate(lines):
@@ -82,7 +87,7 @@ def _validate_cmvn(shift: Any, scale: Any, dim: int) -> _Cmvn:
 @functools.lru_cache(maxsize=16)
 def _cmvn_file(path: str, _dev: int, _ino: int, _mtime_ns: int, _size: int, dim: int) -> _Cmvn:
     """am.mvn parsed and validated once per file version."""
-    c = _validate_cmvn(*_load_cmvn_cached(str(Path(path).resolve()), _mtime_ns, _size), dim)
+    c = _validate_cmvn(*_load_cmvn_cached(path, _dev, _ino, _mtime_ns, _size), dim)
     c.shift.flags.writeable = c.scale.flags.writeable = False  # shared by later calls
     return c
 
@@ -92,9 +97,7 @@ def _resolve_cmvn(cmvn: CmvnLike | None, dim: int) -> _Cmvn | None:
         return None
     if isinstance(cmvn, (str, os.PathLike)):
         # one stat per call: a path is as cheap as passing the vectors, and edits are seen
-        path = os.fspath(cmvn)
-        st = os.stat(path)
-        return _cmvn_file(os.fsdecode(path), st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size, dim)
+        return _cmvn_file(*_cmvn_file_key(cmvn), dim)
     try:
         shift, scale = cmvn
     except (TypeError, ValueError):

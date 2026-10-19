@@ -228,6 +228,31 @@ def test_fbank_cmvn_path_sees_file_changes(sigs, tmp_path):
         )
 
 
+def test_cmvn_caches_see_replacement_with_same_mtime_and_size(sigs, tmp_path):
+    path = tmp_path / "am.mvn"
+    shift, scale = np.zeros(560, np.float32), np.ones(560, np.float32)
+    _write_am_mvn(path, shift, scale)
+    before = path.stat()
+    np.testing.assert_array_equal(asrfront.sensevoice.load_cmvn(path)[0], shift)
+    asrfront.sensevoice.fbank(sigs["speech"], cmvn=path)  # warm both caches
+
+    replacement = tmp_path / "replacement.mvn"
+    shift = np.full(560, 2, np.float32)
+    _write_am_mvn(replacement, shift, scale)
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    replacement.replace(path)
+    after = path.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert after.st_ino != before.st_ino
+
+    np.testing.assert_array_equal(asrfront.sensevoice.load_cmvn(path)[0], shift)
+    expected = asrfront.sensevoice.fbank(sigs["speech"], cmvn=(shift, scale))
+    np.testing.assert_array_equal(asrfront.sensevoice.fbank(sigs["speech"], cmvn=path), expected)
+    feats, _ = asrfront.sensevoice.fbank_batch([sigs["speech"]] * 2, cmvn=path, n_threads=2)
+    for item in feats:
+        np.testing.assert_array_equal(item, expected)
+
+
 @pytest.mark.parametrize(
     "text,match",
     [

@@ -109,10 +109,10 @@ def check_int(name: str, value: Any, lo: int, hi: int | None = None) -> int:
 
 
 def _available_cores() -> int:
-    try:
-        return len(os.sched_getaffinity(0))
-    except AttributeError:  # not available on macOS / Windows
-        return os.cpu_count() or 1
+    affinity = getattr(os, "sched_getaffinity", None)  # not available on macOS / Windows
+    if affinity is not None:
+        return len(affinity(0))
+    return os.cpu_count() or 1
 
 
 def resolve_threads(n_threads: int | None, n_items: int) -> int:
@@ -174,8 +174,8 @@ def run_parallel(fn: Callable[[int], None], n_items: int, n_threads: int | None)
 
     own = _new_executor(workers) if workers > _available_cores() else None
     ex = own or _executor(workers)
+    futures: list[Future[None]] = []
     try:
-        futures: list[Future[None]] = []
         try:
             for _ in range(workers):
                 futures.append(ex.submit(drain))
@@ -184,11 +184,20 @@ def run_parallel(fn: Callable[[int], None], n_items: int, n_threads: int | None)
             # could be started: take the items here. drain() shares the iterator with any
             # task already submitted.
             drain()
-        try:
-            wait(futures)  # all done before returning: workers write into caller-visible buffers
-        except BaseException:  # e.g. KeyboardInterrupt: do not finish the batch in the background
-            failed.set()
-            raise
+        wait(futures)  # all done before returning: workers write into caller-visible buffers
+    except BaseException:
+        failed.set()
+        for future in futures:
+            future.cancel()
+        # Already running native calls cannot be cancelled. Keep their output buffers
+        # exclusively owned until they finish, even if cleanup is interrupted again.
+        for future in futures:
+            while not future.done():
+                try:
+                    future.exception()
+                except BaseException:
+                    pass
+        raise
     finally:
         if own is not None:
             own.shutdown(wait=False)  # idle once wait() returned; its threads exit

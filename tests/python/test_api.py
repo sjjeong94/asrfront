@@ -353,31 +353,50 @@ def test_run_parallel_limits_concurrency_and_raises():
     assert len(done) < 999  # the other workers stopped taking items
 
 
-def test_run_parallel_stops_on_interrupt(monkeypatch):
-    import time
+@pytest.mark.parametrize("own_pool", [False, True])
+def test_run_parallel_waits_for_workers_on_interrupt(monkeypatch, own_pool):
+    import threading
 
     from asrfront import _audio
 
-    def interrupted_wait(fs):
-        time.sleep(0.02)
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(_audio, "wait", interrupted_wait)
+    monkeypatch.setattr(_audio, "_available_cores", lambda: 1 if own_pool else 2)
+    started = threading.Barrier(3)
+    interrupted = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
     done = []
+    observed = []
 
     def work(i):
-        time.sleep(0.002)
+        started.wait(timeout=5)
+        assert release.wait(5)
         done.append(i)
 
-    with pytest.raises(KeyboardInterrupt):
-        _audio.run_parallel(work, 1000, 4)
-    # the workers finish their current item and stop; without the stop, all 1000 items
-    # would be done within ~0.5 s
-    time.sleep(1.0)
-    n = len(done)
-    assert n < 1000
-    time.sleep(0.1)
-    assert len(done) == n
+    def interrupted_wait(fs):
+        started.wait(timeout=5)  # both workers are writing into caller-owned output
+        interrupted.set()
+        raise KeyboardInterrupt
+
+    def run():
+        try:
+            _audio.run_parallel(work, 100, 2)
+        except KeyboardInterrupt:
+            observed.append(sorted(done))
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(_audio, "wait", interrupted_wait)
+    caller = threading.Thread(target=run)
+    caller.start()
+    try:
+        assert interrupted.wait(5)
+        assert not returned.wait(0.1), "returned while workers can still modify output"
+    finally:
+        release.set()
+        caller.join(timeout=5)
+    assert not caller.is_alive()
+    assert observed == [[0, 1]]
+    assert sorted(done) == [0, 1]  # queued items were stopped
 
 
 def test_free_threaded_build_keeps_the_gil_disabled():

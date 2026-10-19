@@ -135,6 +135,14 @@ def test_max_duration_values(tmp_path):
     assert len(asrfront.load(b"", max_duration=1)) == 0
 
 
+@pytest.mark.parametrize("duration", [1e20, 1e308, np.finfo(np.float64).max])
+def test_max_duration_large_finite_values(tmp_path, duration):
+    path = write_wav(tmp_path / "a.wav", noise_s16(100))
+    expected = asrfront.load(path)
+    np.testing.assert_array_equal(asrfront.load(path, max_duration=duration), expected)
+    np.testing.assert_array_equal(asrfront.load(path.read_bytes(), max_duration=duration), expected)
+
+
 def test_error_details(tmp_path):
     """Errors say what is unsupported (or which container is broken) and list what is."""
     wav = write_wav(tmp_path / "a.wav", noise_s16(100)).read_bytes()
