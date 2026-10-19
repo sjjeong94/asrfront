@@ -157,6 +157,38 @@ static void test_sensevoice(void) {
     CHECK(af_sensevoice_create(&cfg, &h) == AF_EINVAL);
 }
 
+/* af_whisper_log_mel_ld: each row as af_whisper_log_mel's, the gap after it untouched. Covers
+ * the plain and the silence-skipping normalization (pad_or_trim with a short input). */
+static void test_whisper_ld(void) {
+    const size_t n = 16123, gap = 5;
+    float *audio = malloc(n * sizeof(float));
+    for (size_t i = 0; i < n; i++)
+        audio[i] = 0.3f * sinf(0.013f * (float)i);
+    for (int pad = 0; pad < 2; pad++) {
+        af_whisper_config cfg;
+        af_whisper *h = NULL;
+        af_whisper_default_config(&cfg);
+        cfg.pad_or_trim = pad;
+        CHECK(af_whisper_create(&cfg, &h) == AF_OK);
+        const size_t frames = af_whisper_out_frames(h, n), ld = frames + gap;
+        float *a = malloc(80 * frames * sizeof(float)), *b = malloc(80 * ld * sizeof(float));
+        for (size_t i = 0; i < 80 * ld; i++)
+            b[i] = 7.0f;
+        CHECK(af_whisper_log_mel(h, audio, n, a) == AF_OK);
+        CHECK(af_whisper_log_mel_ld(h, audio, n, b, ld) == AF_OK);
+        for (size_t m = 0; m < 80; m++) {
+            CHECK(memcmp(a + m * frames, b + m * ld, frames * sizeof(float)) == 0);
+            for (size_t t = frames; t < ld; t++)
+                CHECK(b[m * ld + t] == 7.0f);
+        }
+        CHECK(af_whisper_log_mel_ld(h, audio, n, b, frames - 1) == AF_EINVAL);
+        af_whisper_destroy(h);
+        free(a);
+        free(b);
+    }
+    free(audio);
+}
+
 static void test_misc(void) {
     CHECK(strcmp(af_version(), ASRFRONT_VERSION) == 0);
     CHECK(strcmp(af_strerror(AF_EINVAL), "invalid argument") == 0);
@@ -166,6 +198,7 @@ int main(void) {
     test_whisper();
     test_whisper_silence_skip();
     test_whisper_padded();
+    test_whisper_ld();
     test_sensevoice();
     test_misc();
     if (failures) {
