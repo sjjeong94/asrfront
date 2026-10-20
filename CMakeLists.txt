@@ -53,6 +53,10 @@ function(asrfront_kernel_options target)
   if(ASRFRONT_HAVE_ALIGN_LOOPS)
     target_compile_options(${target} PRIVATE -falign-loops=32)
   endif()
+  if(NOT MSVC)
+    # sqrtf without errno: vectorizes (sqrt_f32); its results do not change
+    target_compile_options(${target} PRIVATE -fno-math-errno)
+  endif()
 endfunction()
 
 # SIMD kernels: the same source compiled per ISA, selected at runtime (kernels.c).
@@ -106,6 +110,7 @@ add_library(asrfront_core STATIC
   csrc/common.c
   csrc/fft.c
   csrc/flac.c
+  csrc/gemma4.c
   csrc/kernels.c
   csrc/melbank.c
   csrc/mp3.c

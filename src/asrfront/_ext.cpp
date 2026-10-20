@@ -265,6 +265,33 @@ struct SenseVoice {
     }
 };
 
+struct Gemma4 {
+    af_gemma4 *h = nullptr;
+
+    Gemma4() { check(af_gemma4_create(&h)); }
+    ~Gemma4() { af_gemma4_destroy(h); }
+    Gemma4(const Gemma4 &) = delete;
+    Gemma4 &operator=(const Gemma4 &) = delete;
+
+    nb::object log_mel(Audio audio, size_t n_frames, OutArg out) {
+        size_t n = audio.shape(0);
+        return compute_into(n_frames, 128, out, [&](float *o) {
+            return af_gemma4_log_mel(h, audio.data(), n, n_frames, o);
+        });
+    }
+
+    int64_t log_mel_many(const std::vector<Audio> &audios, size_t n_frames,
+                         const std::vector<OutC> &outs) {
+        check_count(audios.size(), outs.size());
+        for (const OutC &o : outs)
+            check_shape(o, n_frames, 128);
+        return run_many(audios, [&](size_t i) {
+            return af_gemma4_log_mel(h, audios[i].data(), audios[i].shape(0), n_frames,
+                                     outs[i].data());
+        });
+    }
+};
+
 NB_MODULE(_ext, m) {
     m.doc() = "asrfront native extension";
     m.attr("__version__") = af_version();
@@ -395,6 +422,21 @@ NB_MODULE(_ext, m) {
              "n_padded"_a, nb::arg("outs").noconvert(),
              "log_mel_padded(audios[i], n_padded, out=outs[i]) for every i with one GIL release; "
              "returns as log_mel_many.");
+
+    nb::class_<Gemma4>(m, "Gemma4Frontend")
+        .def(nb::init<>())
+        .def_static("out_frames", &af_gemma4_out_frames, "n_padded"_a,
+                    "Frames for an input padded to n_padded samples.")
+        .def_static("valid_frames", &af_gemma4_valid_frames, "n_samples"_a,
+                    "Frames that read no padding (the feature mask sum).")
+        .def("log_mel", &Gemma4::log_mel, "audio"_a, "n_frames"_a,
+             nb::arg("out").none().noconvert() = nb::none(),
+             "Log-mel features (n_frames, 128): the valid frames of `audio`, then zeros. With "
+             "`out`, writes into it and returns None.")
+        .def("log_mel_many", &Gemma4::log_mel_many, nb::arg("audios").noconvert(), "n_frames"_a,
+             nb::arg("outs").noconvert(),
+             "log_mel(audios[i], n_frames, out=outs[i]) for every i with one GIL release; "
+             "returns as WhisperFrontend.log_mel_many.");
 
     nb::class_<SenseVoice>(m, "SenseVoiceFrontend")
         .def(nb::init<int, int, int, float, unsigned long long, std::optional<Vec>,

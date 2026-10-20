@@ -23,12 +23,14 @@ def _frontends():
         _ext.WhisperFrontend(n_mels=128, pad_or_trim=False),
         _ext.SenseVoiceFrontend(),
         _ext.SenseVoiceFrontend(dither=1.0, seed=3),
+        _ext.Gemma4Frontend(),
     )
 
 
 def _run(fes, audio):
-    w80, w128, sv, svd = fes
+    w80, w128, sv, svd, g4 = fes
     out = [w80.log_mel(audio), sv.fbank(audio), sv.fbank_raw(audio), svd.fbank_raw(audio)]
+    out.append(g4.log_mel(audio, g4.out_frames(audio.size + 127)))
     if audio.size > 200:
         out.append(w128.log_mel(audio))
     out.append(w128.log_mel_padded(audio, audio.size + 333))  # qwen3_asr hf_padding batches

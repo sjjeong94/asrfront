@@ -1,7 +1,7 @@
 # asrfront
 
 Super-fast frontend (feature extraction) for ASR models such as **Whisper**,
-**SenseVoiceSmall** and **Qwen3-ASR**.
+**SenseVoiceSmall**, **Qwen3-ASR** and the audio input of **Gemma 4** (E2B / E4B).
 
 - native C core with no dependencies (own FFT, SIMD kernels with runtime CPU dispatch)
 - audio loading: WAV / AIFF / CAF / FLAC / MP3 / raw PCM (and more) → 16 kHz mono, matching
@@ -16,6 +16,7 @@ audio = asrfront.load("speech.mp3")  # 16 kHz mono float32
 mel = asrfront.whisper.log_mel(audio)  # (80, 3000)
 feat = asrfront.sensevoice.fbank(audio, cmvn="am.mvn")  # (T', 560)
 mel = asrfront.qwen3_asr.log_mel(audio)  # (128, T)
+mel = asrfront.gemma4.log_mel(audio)  # (T, 128)
 ```
 
 ## Install
@@ -114,6 +115,25 @@ computed on its own (as vLLM does); `hf_padding=True` reproduces the transformer
 which zero-pads a batch to its longest item before the STFT, so an item's last frames depend
 on the batch. Details: [`docs/qwen3_asr.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/qwen3_asr.md).
 
+### Gemma 4 (E2B / E4B)
+
+```python
+from asrfront import gemma4
+
+mel = gemma4.log_mel(audio)  # (T, 128), time first; at most 30 s, like transformers
+feats, lengths = gemma4.log_mel_batch([a1, a2])  # (2, T, 128) zero frames after `lengths`
+mask = np.arange(feats.shape[1]) < lengths[:, None]  # input_features_mask
+n_tokens = gemma4.num_audio_tokens(lengths)  # audio soft tokens in the prompt (<= 750)
+```
+
+Equivalent to transformers' `Gemma4AudioFeatureExtractor` with the settings both
+[gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) and
+[gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) ship, as `Gemma4Processor`
+calls it: 128 HTK mel bins of the magnitude spectrum, `log(mel + 0.001)`, 20 ms frames every
+10 ms; inputs truncated to 30 s (`truncation=False` keeps all), a batch padded to a multiple of
+128 samples, and the padding's frames zeroed. An item's features do not depend on the batch.
+Details: [`docs/gemma4.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/gemma4.md).
+
 ### Threads
 
 All native calls release the GIL. The `*_batch` functions spread items over a thread pool
@@ -133,6 +153,7 @@ are processed in chunks with one GIL release each.
 | | | librosa STFT + mel (numpy) 6.6–7.0 ms | ~7.7x |
 | SenseVoice fbank + LFR + CMVN | 1.3–1.4 ms | FunASR `WavFrontend` (torchaudio) 12–14 ms | ~9–10x |
 | kaldi fbank only | 1.3 ms | `torchaudio.compliance.kaldi.fbank` 11–12 ms | ~9x |
+| Gemma 4 log-mel (2999 × 128) | 1.9 ms | transformers 5.20.2 `Gemma4AudioFeatureExtractor` (numpy) 21 ms | ~11x |
 | `load`: WAV 16 kHz | 0.3 ms | whisper `load_audio` (ffmpeg subprocess) 10 ms / `librosa.load` 2.5 ms | 33x / 8x |
 | `load`: WAV 44.1 kHz stereo | 14 ms | whisper `load_audio` 36 ms / `librosa.load` 31 ms | 2.5x / 2.2x |
 | `load`: MP3 44.1 kHz stereo | 25 ms | whisper `load_audio` 38 ms / `librosa.load` 34 ms | 1.5x / 1.4x |
@@ -157,10 +178,15 @@ tones, chirp, noise, clipping, DC offset, real speech, short and > 30 s inputs):
 | Qwen3-ASR (vs. transformers 4.57.6, float32) | 6.7e-5 | 2.0e-5 | 1e-4 |
 | kaldi fbank (log domain) | 7.7e-4 | 2.0e-4 | 1e-3 |
 | SenseVoice features with SenseVoiceSmall's `am.mvn` | 1.1e-4 | | |
+| Gemma 4 log-mel, bins above the mel floor (mel ≥ 0.01) | 1.6e-4 | 1.6e-4 | 5e-4 |
+| Gemma 4 log-mel, all bins | 6.4e-3 | 1.1e-3 | 1e-2 |
 
 The whisper mel filters are bit-identical to whisper's `mel_filters.npz`. Against the
 original float32 libraries: ≤ 1e-4 vs. whisper (torch) and ≤ 2e-3 vs. torchaudio's kaldi
-fbank (torchaudio builds its mel banks in float32).
+fbank (torchaudio builds its mel banks in float32). Gemma 4's `log(mel + 0.001)` magnifies
+float32 FFT round-off (~1e-6 of a frame's peak) in bins far below the 0.001 floor, where the
+features are ≈ log(0.001) = −6.9; there asrfront differs from transformers (whose numpy FFT
+is more precise) by up to 6.3e-3 on pure tones ([`docs/gemma4.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/gemma4.md)).
 
 ## Development
 
@@ -169,6 +195,8 @@ uv sync                       # create .venv and build the extension (needs a C 
 uv run pytest                 # tests; add --group ref for torch/torchaudio comparisons
 uv run --group ref --group load pytest   # + comparisons against ffmpeg 7.0.2 (imageio-ffmpeg)
 uv run --group ref --group qwen pytest   # + Qwen3-ASR vs. transformers 4.57.6
+# Gemma 4 vs. transformers needs transformers >= 5.5 (conflicts with the qwen pin): run
+# tests/python/test_gemma4.py in an environment with it and asrfront installed
 # on aarch64 / Apple silicon ffmpeg's float path differs by 1 LSB from x86, so those
 # comparisons allow 1 LSB there (docs/load.md, "Other platforms")
 uv run cmake -S . -B build/ctest -G Ninja -DASRFRONT_BUILD_TESTS=ON -DASRFRONT_BUILD_BENCH=ON
@@ -177,8 +205,9 @@ uv run cmake --build build/ctest && uv run ctest --test-dir build/ctest
 
 The C API is in [`csrc/include/asrfront.h`](https://github.com/sjjeong94/asrfront/blob/main/csrc/include/asrfront.h). The preprocessing of each
 model is documented step by step in [`docs/whisper.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/whisper.md),
-[`docs/sensevoice.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/sensevoice.md) and
-[`docs/qwen3_asr.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/qwen3_asr.md); see [`docs/design.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/design.md) for design
+[`docs/sensevoice.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/sensevoice.md),
+[`docs/qwen3_asr.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/qwen3_asr.md) and
+[`docs/gemma4.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/gemma4.md); see [`docs/design.md`](https://github.com/sjjeong94/asrfront/blob/main/docs/design.md) for design
 decisions.
 
 ## License

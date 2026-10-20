@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "sjjeong94" }]
-keywords = ["asr", "speech", "whisper", "sensevoice", "fbank", "mel-spectrogram", "kaldi"]
+keywords = ["asr", "speech", "whisper", "sensevoice", "qwen3-asr", "gemma", "fbank", "mel-spectrogram", "kaldi"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

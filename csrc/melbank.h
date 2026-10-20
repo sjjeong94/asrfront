@@ -26,6 +26,11 @@ int af_melbank_slaney(int sr, int n_fft, int n_mels, double fmin, double fmax, a
 int af_melbank_kaldi(int sr, int padded, int n_mels, double low_freq, double high_freq,
                      af_melbank **out);
 
+/* transformers' audio_utils.mel_filter_bank(n_fft / 2 + 1, n_mels, fmin, fmax, sr, norm=None,
+ * mel_scale="htk"): HTK mel scale 2595 log10(1 + f/700), bins at linspace(0, sr // 2),
+ * unnormalized triangles. Computed in double, stored in float32 (Gemma 4). */
+int af_melbank_htk(int sr, int n_fft, int n_mels, double fmin, double fmax, af_melbank **out);
+
 void af_melbank_destroy(af_melbank *mb);
 
 int af_melbank_n_mels(const af_melbank *mb);

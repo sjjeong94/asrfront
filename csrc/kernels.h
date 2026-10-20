@@ -66,6 +66,12 @@ typedef struct af_kernels {
      * successive outputs. */
     void (*resample_run)(const float *bank, int width, const float *x, int m, int step_int,
                          int step_rem, int q, size_t count, float *y);
+
+    /* In place: x = ln(x + add) over n floats (a multiple of AF_VL), for x >= 0 and add a
+     * positive normal number (Gemma 4: log(mel + mel_floor)). */
+    void (*log_add)(float *x, size_t n, float add);
+    /* In place: x = sqrt(x) over n floats (magnitude from power). */
+    void (*sqrt_f32)(float *x, size_t n);
 } af_kernels;
 
 /* Best table for this CPU. ASRFRONT_KERNELS=generic forces the baseline build,

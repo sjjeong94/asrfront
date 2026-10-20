@@ -440,10 +440,10 @@ static void mel(const af_melbank *mb, const float *power, float *out) {
 #define LOG_Q2 0.693359375f
 
 #if defined(AF_VEC_EXT)
-static void log_floor_scaled(float *x, size_t n, float floor, float scale) {
+static void log_floor_scaled(float *x, size_t n, float add, float floor, float scale) {
     const vn vfloor = VZERO + floor;
     for (size_t i = 0; i < n; i += W) { /* n is a multiple of AF_VL */
-        const vn a = vld(x + i);
+        const vn a = vld(x + i) + add;
         const vni keep = a > vfloor; /* false for NaN -> floor */
         const vn v = (vn)((keep & (vni)a) | (~keep & (vni)vfloor));
         const vni u = (vni)v;
@@ -472,9 +472,10 @@ static void log_floor_scaled(float *x, size_t n, float floor, float scale) {
     }
 }
 #else
-static void log_floor_scaled(float *x, size_t n, float floor, float scale) {
+static void log_floor_scaled(float *x, size_t n, float add, float floor, float scale) {
     for (size_t i = 0; i < n; i++) {
-        const float v = x[i] > floor ? x[i] : floor;
+        const float a = x[i] + add;
+        const float v = a > floor ? a : floor;
         uint32_t u;
         memcpy(&u, &v, sizeof(u));
         int e = (int)((u >> 23) & 0xffu) - 126;
@@ -505,12 +506,25 @@ static void log_floor_scaled(float *x, size_t n, float floor, float scale) {
 }
 #endif
 
+/* (x + add) > floor ? x + add : floor, then the log scaled; add = 0 leaves x unchanged (but
+ * -0, whose log is the floor's either way). */
 static void log10_floor(float *x, size_t n, float floor) {
-    log_floor_scaled(x, n, floor, 0.434294481903251827651128918916605082f);
+    log_floor_scaled(x, n, 0.0f, floor, 0.434294481903251827651128918916605082f);
 }
 
 static void log_floor(float *x, size_t n, float floor) {
-    log_floor_scaled(x, n, floor, 1.0f);
+    log_floor_scaled(x, n, 0.0f, floor, 1.0f);
+}
+
+static void log_add(float *x, size_t n, float add) {
+    log_floor_scaled(x, n, add, add, 1.0f);
+}
+
+/* sqrtf is correctly rounded, so every build agrees; the kernels are compiled with
+ * -fno-math-errno (no errno for negative inputs, which do not occur), so this vectorizes. */
+static void sqrt_f32(float *x, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        x[i] = sqrtf(x[i]);
 }
 
 /* ---------------------------------------------------------------------------------- */
@@ -639,6 +653,7 @@ static void resample_run(const float *bank, int width, const float *x, int m, in
 }
 
 const af_kernels AF_CAT(af_kernels, AF_ISA) = {
-    AF_STR(AF_ISA), rfft_power, gather_packed, gather_scaled,     mel,          log10_floor,
-    log_floor,      kaldi_prep, max_f32,       whisper_normalize, resample_dot, resample_run,
+    AF_STR(AF_ISA), rfft_power,   gather_packed, gather_scaled, mel,
+    log10_floor,    log_floor,    kaldi_prep,    max_f32,       whisper_normalize,
+    resample_dot,   resample_run, log_add,       sqrt_f32,
 };

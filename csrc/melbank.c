@@ -151,6 +151,48 @@ int af_melbank_kaldi(int sr, int padded, int n_mels, double low_freq, double hig
     return rc;
 }
 
+static double htk_mel(double f) {
+    return 2595.0 * log10(1.0 + f / 700.0);
+}
+
+int af_melbank_htk(int sr, int n_fft, int n_mels, double fmin, double fmax, af_melbank **out) {
+    if (!out)
+        return AF_EINVAL;
+    *out = NULL;
+    if (sr <= 0 || n_fft < 2 || n_fft % 2 != 0 || n_mels <= 0 || fmin < 0 || fmax <= fmin)
+        return AF_EINVAL;
+    const int n_bins = n_fft / 2 + 1;
+    const int n_pts = n_mels + 2;
+    double *hz = malloc((size_t)n_pts * sizeof(double));
+    float *dense = malloc((size_t)n_mels * n_bins * sizeof(float));
+    if (!hz || !dense) {
+        free(hz);
+        free(dense);
+        return AF_ENOMEM;
+    }
+    /* filter edges at np.linspace(mel(fmin), mel(fmax), n_mels + 2), last point exact */
+    const double m0 = htk_mel(fmin), m1 = htk_mel(fmax);
+    const double step = (m1 - m0) / (n_pts - 1);
+    for (int i = 0; i < n_pts; i++) {
+        const double m = i == n_pts - 1 ? m1 : i * step + m0;
+        hz[i] = 700.0 * (pow(10.0, m / 2595.0) - 1.0);
+    }
+    const double bin_step = (double)(sr / 2) / (n_bins - 1); /* np.linspace(0, sr // 2) */
+    for (int m = 0; m < n_mels; m++) {
+        for (int k = 0; k < n_bins; k++) {
+            const double f = k == n_bins - 1 ? (double)(sr / 2) : k * bin_step;
+            const double down = -(hz[m] - f) / (hz[m + 1] - hz[m]);
+            const double up = (hz[m + 2] - f) / (hz[m + 2] - hz[m + 1]);
+            const double w = down < up ? down : up;
+            dense[(size_t)m * n_bins + k] = (float)(w > 0.0 ? w : 0.0);
+        }
+    }
+    int rc = from_dense(dense, n_mels, n_bins, out);
+    free(hz);
+    free(dense);
+    return rc;
+}
+
 void af_melbank_destroy(af_melbank *mb) {
     if (!mb)
         return;

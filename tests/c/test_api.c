@@ -189,6 +189,38 @@ static void test_whisper_ld(void) {
     free(audio);
 }
 
+static void test_gemma4(void) {
+    CHECK(af_gemma4_out_frames(0) == 0 && af_gemma4_out_frames(160) == 0);
+    CHECK(af_gemma4_out_frames(161) == 1 && af_gemma4_out_frames(16000) == 99);
+    CHECK(af_gemma4_valid_frames(0) == 0 && af_gemma4_valid_frames(160) == 0);
+    CHECK(af_gemma4_valid_frames(161) == 1 && af_gemma4_valid_frames(16001) == 100);
+    const size_t n = 16123, frames = af_gemma4_out_frames(16128) + 3; /* 3 extra: zeros */
+    float *audio = malloc(n * sizeof(float)), *out = malloc(frames * 128 * sizeof(float));
+    for (size_t i = 0; i < n; i++)
+        audio[i] = 0.3f * sinf(0.013f * (float)i);
+    for (size_t i = 0; i < frames * 128; i++)
+        out[i] = 7.0f;
+    af_gemma4 *h = NULL;
+    CHECK(af_gemma4_create(&h) == AF_OK);
+    CHECK(af_gemma4_log_mel(h, audio, n, frames, out) == AF_OK);
+    const size_t valid = af_gemma4_valid_frames(n);
+    int finite = 1, zeros = 1;
+    for (size_t i = 0; i < valid * 128; i++)
+        finite &= isfinite(out[i]) && out[i] != 7.0f && out[i] > -7.0f;
+    for (size_t i = valid * 128; i < frames * 128; i++)
+        zeros &= out[i] == 0.0f;
+    CHECK(finite && zeros);
+    CHECK(af_gemma4_log_mel(h, audio, n, 2, out) == AF_OK); /* fewer frames than valid */
+    CHECK(af_gemma4_log_mel(h, NULL, 0, 0, NULL) == AF_OK);
+    CHECK(af_gemma4_log_mel(h, NULL, 10, 1, out) == AF_EINVAL);
+    CHECK(af_gemma4_log_mel(NULL, audio, n, 1, out) == AF_EINVAL);
+    CHECK(af_gemma4_create(NULL) == AF_EINVAL);
+    af_gemma4_destroy(h);
+    af_gemma4_destroy(NULL);
+    free(audio);
+    free(out);
+}
+
 static void test_misc(void) {
     CHECK(strcmp(af_version(), ASRFRONT_VERSION) == 0);
     CHECK(strcmp(af_strerror(AF_EINVAL), "invalid argument") == 0);
@@ -200,6 +232,7 @@ int main(void) {
     test_whisper_padded();
     test_whisper_ld();
     test_sensevoice();
+    test_gemma4();
     test_misc();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);

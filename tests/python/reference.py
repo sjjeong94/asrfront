@@ -4,6 +4,8 @@
   ``librosa.filters.mel`` (ISC).
 - SenseVoice: port of ``torchaudio.compliance.kaldi.fbank`` (BSD-2-Clause) plus
   ``apply_lfr`` / ``apply_cmvn`` / ``load_cmvn`` from FunASR's ``WavFrontend`` (MIT).
+- Gemma 4: port of transformers' ``Gemma4AudioFeatureExtractor`` and ``mel_filter_bank``
+  (Apache-2.0) with the E2B / E4B checkpoints' settings.
 - Audio loading: ffmpeg's decode -> resample -> downmix -> s16 pipeline as used by whisper's
   ``load_audio``, written from the behavior spec in ``docs/load.md`` (not from ffmpeg's code).
 
@@ -164,6 +166,88 @@ def qwen3_asr_transformers(audios: list[np.ndarray]) -> tuple[np.ndarray, np.nda
         return_tensors="np",
     )
     return out["input_features"], out["attention_mask"].sum(-1)
+
+
+# ---------------------------------------------------------------------------------------------
+# Gemma 4 (E2B / E4B)
+# ---------------------------------------------------------------------------------------------
+
+GEMMA4_FRAME = 320
+GEMMA4_HOP = 160
+GEMMA4_FFT = 512
+GEMMA4_MEL_FLOOR = 1e-3
+
+
+def htk_mel_filters(
+    n_bins: int = GEMMA4_FFT // 2 + 1, n_mels: int = 128, fmin: float = 0.0, fmax: float = 8000.0
+) -> np.ndarray:
+    """transformers' ``mel_filter_bank(..., norm=None, mel_scale="htk")``, ``(n_mels, n_bins)``."""
+    mel = np.linspace(
+        2595.0 * np.log10(1.0 + fmin / 700.0), 2595.0 * np.log10(1.0 + fmax / 700.0), n_mels + 2
+    )
+    hz = 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+    fft_f = np.linspace(0, SAMPLE_RATE // 2, n_bins)
+    slopes = hz[None, :] - fft_f[:, None]
+    down = -slopes[:, :-2] / np.diff(hz)[:-1]
+    up = slopes[:, 2:] / np.diff(hz)[1:]
+    return np.maximum(0.0, np.minimum(down, up)).T
+
+
+def gemma4_padded_length(n_longest: int) -> int:
+    """A batch's length: the longest item rounded up to a multiple of 128 samples."""
+    return -(-n_longest // 128) * 128
+
+
+def gemma4_log_mel_stages(audio: np.ndarray, n_padded: int | None = None) -> dict:
+    """Gemma 4 audio features of ``audio`` (already truncated to 30 s if wanted) zero-padded to
+    ``n_padded`` samples (default: to a multiple of 128): ``frames``, ``magnitude``, ``mel``,
+    ``mask`` (valid frames) and ``out`` ``(T, 128)``, the padding's frames zeroed."""
+    audio = np.asarray(audio, dtype=np.float64)
+    n = audio.shape[0]
+    if n_padded is None:
+        n_padded = gemma4_padded_length(n)
+    x = np.zeros(GEMMA4_FRAME // 2 + n_padded)  # semicausal padding, then the batch padding
+    x[GEMMA4_FRAME // 2 : GEMMA4_FRAME // 2 + n] = audio
+    n_frames = max(0, (x.shape[0] - (GEMMA4_FRAME + 1)) // GEMMA4_HOP + 1)
+    idx = np.arange(n_frames)[:, None] * GEMMA4_HOP + np.arange(GEMMA4_FRAME)[None, :]
+    frames = x[idx] * hann_window_periodic(GEMMA4_FRAME)
+    magnitude = np.abs(np.fft.rfft(frames, n=GEMMA4_FFT, axis=-1))
+    mel = magnitude @ htk_mel_filters().T
+    out = np.log(mel + GEMMA4_MEL_FLOOR)
+    # valid if the frame's (unused) last sample t * hop + 320 of the padded signal is input
+    mask = np.arange(n_frames) * GEMMA4_HOP + GEMMA4_FRAME < GEMMA4_FRAME // 2 + n
+    out = out * mask[:, None]
+    return {"frames": frames, "magnitude": magnitude, "mel": mel, "mask": mask, "out": out}
+
+
+def gemma4_log_mel(audio: np.ndarray, n_padded: int | None = None) -> np.ndarray:
+    return gemma4_log_mel_stages(audio, n_padded)["out"]
+
+
+def gemma4_transformers(audios: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """transformers' ``Gemma4AudioFeatureExtractor`` with the E2B / E4B checkpoints' settings
+    (``processor_config.json``), called as ``Gemma4Processor`` does. Returns ``(features
+    (B, T, 128), mask sums (B,))``. Needs transformers >= 5.5 (not a dependency group: the
+    ``qwen`` group pins an older version)."""
+    from transformers.models.gemma4.feature_extraction_gemma4 import Gemma4AudioFeatureExtractor
+
+    fe = Gemma4AudioFeatureExtractor(
+        feature_size=128,
+        sampling_rate=16000,
+        frame_length_ms=20.0,
+        hop_length_ms=10.0,
+        min_frequency=0.0,
+        max_frequency=8000.0,
+        preemphasis=0.0,
+        fft_overdrive=False,
+        dither=0.0,
+        input_scale_factor=1.0,
+        mel_floor=0.001,
+        padding_value=0.0,
+        return_attention_mask=True,
+    )
+    out = fe([np.asarray(a, dtype=np.float32) for a in audios], return_tensors="np")
+    return out["input_features"], out["input_features_mask"].sum(-1)
 
 
 def load_whisper_mel_filters(path: str | Path, n_mels: int) -> np.ndarray:

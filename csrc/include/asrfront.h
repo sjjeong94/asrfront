@@ -1,5 +1,6 @@
 /*
- * asrfront - dependency-free ASR frontends (Whisper log-mel, SenseVoice fbank).
+ * asrfront - dependency-free ASR frontends (Whisper log-mel, SenseVoice fbank, Gemma 4
+ * audio log-mel).
  *
  * Usage pattern: create a handle once (precomputes windows, FFT plans, filter
  * banks and scratch space), call the compute function as many times as needed,
@@ -108,6 +109,29 @@ int af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, 
 
 /* Raw kaldi fbank without LFR/CMVN. out: (raw_frames, n_mels) float32. */
 int af_sensevoice_fbank_raw(af_sensevoice *h, const float *audio, size_t n_samples, float *out);
+
+/* ------------------------------------------------------------------------ */
+/* Gemma 4 audio log-mel (transformers Gemma4AudioFeatureExtractor)         */
+/* ------------------------------------------------------------------------ */
+
+/* Gemma 4 E2B / E4B: 128 HTK mel bins of the magnitude spectrum, log(mel + 0.001), frames of
+ * 20 ms every 10 ms after 160 zeros of padding (see docs/gemma4.md). Truncating the input
+ * to 30 s and padding a batch to a multiple of 128 samples, as transformers does, is left to
+ * the caller: it only decides the frame count. */
+typedef struct af_gemma4 af_gemma4;
+
+int af_gemma4_create(af_gemma4 **out);
+void af_gemma4_destroy(af_gemma4 *h);
+
+/* Frames for an input (zero-)padded to n_padded samples. */
+size_t af_gemma4_out_frames(size_t n_padded);
+/* Of those, the frames that read no padding (the feature mask): (n_samples - 1) / 160. */
+size_t af_gemma4_valid_frames(size_t n_samples);
+
+/* out: (n_frames, 128) float32, row-major: the valid frames of the input (at most n_frames),
+ * then zeros, as transformers masks the padding's frames. */
+int af_gemma4_log_mel(af_gemma4 *h, const float *audio, size_t n_samples, size_t n_frames,
+                      float *out);
 
 /* ------------------------------------------------------------------------ */
 /* Audio loading (16 kHz mono float32, as whisper's ffmpeg-based load_audio) */
