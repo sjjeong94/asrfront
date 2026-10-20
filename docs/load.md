@@ -359,10 +359,11 @@ would be useless; GSM 6.10 / G.722 / other WAV codecs.
 ### Raw PCM
 
 Headerless s16le, 16 kHz, mono (`int16 / 32768`); an odd trailing byte is dropped. Selected by
-a `.pcm` / `.raw` file extension, or for bytes input without a recognized header (see
+a `.pcm` / `.raw` file extension, or for bytes input without a recognized header (bytes of a
+known unsupported container such as M4A or Ogg raise instead; see
 [`design.md`](design.md#format-detection) for the detection rules; MP3 sync detection
-requires two consecutive valid Layer III frame headers so that raw PCM is never taken for
-MP3).
+requires two consecutive valid Layer III frame headers, or three after leading junk, so that
+raw PCM is never taken for MP3).
 
 ## Resource use
 

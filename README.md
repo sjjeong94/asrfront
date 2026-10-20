@@ -118,6 +118,9 @@ on the batch. Details: [`docs/qwen3_asr.md`](https://github.com/sjjeong94/asrfro
 
 All native calls release the GIL. The `*_batch` functions spread items over a thread pool
 (`n_threads=None` uses every available core); each Python thread uses its own native handle.
+`n_threads` is an upper bound: a batch with little audio in total (about 2 s per thread) uses
+fewer threads, since handing short items between threads costs more than computing them. Items
+are processed in chunks with one GIL release each.
 
 ## Performance
 

@@ -89,7 +89,8 @@ def log_mel_batch(
 
     Args:
         audios: sequence of 1-D waveforms (any lengths), or a 2-D ``(B, N)`` array.
-        n_threads: worker threads; ``None`` uses all available cores.
+        n_threads: at most this many worker threads (fewer for little audio); ``None``: all
+            available cores.
         hf_padding: reproduce the transformers backend's batches, where every waveform is
             zero-padded to the longest one *before* the STFT: the last frames of shorter items
             then see zeros instead of the reflection, so an item's features depend on the
@@ -124,8 +125,11 @@ def log_mel_batch(
         shape = (len(items), N_MELS, n_frames)
         feats = np.empty(shape, np.float32) if out is None else _check_out(out, shape)
 
-        def work(i: int, audio: np.ndarray) -> None:
-            _frontend().log_mel_padded(audio, n_padded, out=feats[i])
+        def work(chunk: range, audios: list[np.ndarray]) -> int:
+            return _frontend().log_mel_padded_many(audios, n_padded, [feats[i] for i in chunk])
+
+        # every item is computed over the padded length
+        costs: list[int] | None = [n_padded] * len(items)
 
     else:
         for i, n in enumerate(sizes):
@@ -136,13 +140,17 @@ def log_mel_batch(
         # a new array is already zero after each item; a caller's buffer is cleared per item
         feats = np.zeros(shape, np.float32) if out is None else _check_out(out, shape)
 
-        def work(i: int, audio: np.ndarray) -> None:
-            n = lengths[i]
-            _frontend().log_mel(audio, out=feats[i, :, :n])  # rows of feats[i], no copy
-            if out is not None and n < n_frames:
-                feats[i, :, n:] = 0.0
+        def work(chunk: range, audios: list[np.ndarray]) -> int:
+            # rows of feats[i], no copy
+            bad = _frontend().log_mel_many(audios, [feats[i, :, : lengths[i]] for i in chunk])
+            if out is not None:
+                for i in chunk:
+                    feats[i, :, lengths[i] :] = 0.0
+            return bad
 
-    run_batch(work, items, n_threads)
+        costs = None
+
+    run_batch(work, items, n_threads, costs)
     return feats, lengths
 
 

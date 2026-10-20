@@ -3,6 +3,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/vector.h>
 
 #include <cstring>
 #include <memory>
@@ -28,6 +29,8 @@ using OutArg = std::optional<nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::d
 using OutRows = std::optional<nb::ndarray<float, nb::ndim<2>, nb::device::cpu>>;
 using Bytes = nb::ndarray<const uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using Out1D = nb::ndarray<nb::numpy, float, nb::ndim<1>, nb::c_contig>;
+using OutC = nb::ndarray<float, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+using Rows = nb::ndarray<float, nb::ndim<2>, nb::device::cpu>;
 
 static void check(int rc) {
     switch (rc) {
@@ -66,17 +69,72 @@ template <typename F> static Out2D compute_2d(size_t rows, size_t cols, F &&fn) 
     return Out2D(buf, {rows, cols}, owner);
 }
 
+template <typename A> static void check_shape(const A &out, size_t rows, size_t cols) {
+    if (out.shape(0) != rows || out.shape(1) != cols)
+        throw nb::value_error(("out has shape (" + std::to_string(out.shape(0)) + ", " +
+                               std::to_string(out.shape(1)) + "), expected (" +
+                               std::to_string(rows) + ", " + std::to_string(cols) + ")")
+                                  .c_str());
+}
+
+// Row stride (elements) of an output of `frames` columns whose rows are contiguous and apart.
+static size_t row_stride(const Rows &out, size_t frames) {
+    const int64_t ld = out.stride(0);
+    if ((frames > 1 && out.stride(1) != 1) || ld < (int64_t)frames)
+        throw nb::value_error("out must have contiguous rows (e.g. a slice a[:, :n] of a "
+                              "C-contiguous array)");
+    return (size_t)ld;
+}
+
+// Whether no sample is NaN or inf (exponent bits all set), in blocks that vectorize.
+static bool all_finite(const float *x, size_t n) {
+    for (size_t i0 = 0; i0 < n; i0 += 1024) {
+        const size_t end = n - i0 < 1024 ? n : i0 + 1024;
+        unsigned bad = 0;
+        for (size_t i = i0; i < end; i++) {
+            uint32_t u;
+            std::memcpy(&u, x + i, sizeof u);
+            bad |= (u & 0x7F800000u) == 0x7F800000u;
+        }
+        if (bad)
+            return false;
+    }
+    return true;
+}
+
+// Batch chunks (the *_many methods): one GIL release for all items, since per-item releases
+// (and the NaN / inf check in numpy) make worker threads queue for the GIL when items are
+// short. fn(i) returns an AF_* code; the first failure stops the chunk. Returns the index of
+// the first item with a NaN / inf sample, which stops the chunk before it is computed, or -1.
+template <typename F> static int64_t run_many(const std::vector<Audio> &audios, F &&fn) {
+    int rc = AF_OK;
+    int64_t bad = -1;
+    {
+        nb::gil_scoped_release release;
+        for (size_t i = 0; i < audios.size() && rc == AF_OK; i++) {
+            if (!all_finite(audios[i].data(), audios[i].shape(0))) {
+                bad = (int64_t)i;
+                break;
+            }
+            rc = fn(i);
+        }
+    }
+    check(rc);
+    return bad;
+}
+
+static void check_count(size_t audios, size_t outs) {
+    if (audios != outs)
+        throw nb::value_error("audios and outs must have the same length");
+}
+
 // Either fill a new array (out is None) or write into the caller's C-contiguous,
 // writable float32 buffer of exactly (rows, cols) and return None.
 template <typename F>
 static nb::object compute_into(size_t rows, size_t cols, OutArg &out, F &&fn) {
     if (!out)
         return nb::cast(compute_2d(rows, cols, fn));
-    if (out->shape(0) != rows || out->shape(1) != cols)
-        throw nb::value_error(("out has shape (" + std::to_string(out->shape(0)) + ", " +
-                               std::to_string(out->shape(1)) + "), expected (" +
-                               std::to_string(rows) + ", " + std::to_string(cols) + ")")
-                                  .c_str());
+    check_shape(*out, rows, cols);
     int rc;
     {
         nb::gil_scoped_release release;
@@ -109,29 +167,46 @@ struct Whisper {
             return nb::cast(compute_2d((size_t)n_mels, frames, [&](float *o) {
                 return af_whisper_log_mel(h, audio.data(), n, o);
             }));
-        if (out->shape(0) != (size_t)n_mels || out->shape(1) != frames)
-            throw nb::value_error(("out has shape (" + std::to_string(out->shape(0)) + ", " +
-                                   std::to_string(out->shape(1)) + "), expected (" +
-                                   std::to_string(n_mels) + ", " + std::to_string(frames) + ")")
-                                      .c_str());
-        // strides in elements: contiguous rows that do not overlap
-        const int64_t ld = out->stride(0);
-        if ((frames > 1 && out->stride(1) != 1) || ld < (int64_t)frames)
-            throw nb::value_error("out must have contiguous rows (e.g. a slice a[:, :n] of a "
-                                  "C-contiguous array)");
+        check_shape(*out, (size_t)n_mels, frames);
+        const size_t ld = row_stride(*out, frames);
         int rc;
         {
             nb::gil_scoped_release release;
-            rc = af_whisper_log_mel_ld(h, audio.data(), n, out->data(), (size_t)ld);
+            rc = af_whisper_log_mel_ld(h, audio.data(), n, out->data(), ld);
         }
         check(rc);
         return nb::none();
+    }
+
+    int64_t log_mel_many(const std::vector<Audio> &audios, const std::vector<Rows> &outs) {
+        check_count(audios.size(), outs.size());
+        std::vector<size_t> ld(outs.size());
+        for (size_t i = 0; i < outs.size(); i++) {
+            const size_t frames = af_whisper_out_frames(h, audios[i].shape(0));
+            check_shape(outs[i], (size_t)n_mels, frames);
+            ld[i] = row_stride(outs[i], frames);
+        }
+        return run_many(audios, [&](size_t i) {
+            return af_whisper_log_mel_ld(h, audios[i].data(), audios[i].shape(0), outs[i].data(),
+                                         ld[i]);
+        });
     }
 
     nb::object log_mel_padded(Audio audio, size_t n_padded, OutArg out) {
         size_t n = audio.shape(0);
         return compute_into((size_t)n_mels, n_padded / 160, out, [&](float *o) {
             return af_whisper_log_mel_padded(h, audio.data(), n, n_padded, o);
+        });
+    }
+
+    int64_t log_mel_padded_many(const std::vector<Audio> &audios, size_t n_padded,
+                                const std::vector<OutC> &outs) {
+        check_count(audios.size(), outs.size());
+        for (const OutC &o : outs)
+            check_shape(o, (size_t)n_mels, n_padded / 160);
+        return run_many(audios, [&](size_t i) {
+            return af_whisper_log_mel_padded(h, audios[i].data(), audios[i].shape(0), n_padded,
+                                             outs[i].data());
         });
     }
 };
@@ -170,6 +245,16 @@ struct SenseVoice {
         size_t n = audio.shape(0);
         return compute_into(af_sensevoice_out_frames(h, n), af_sensevoice_feat_dim(h), out,
                             [&](float *o) { return af_sensevoice_fbank(h, audio.data(), n, o); });
+    }
+
+    int64_t fbank_many(const std::vector<Audio> &audios, const std::vector<OutC> &outs) {
+        check_count(audios.size(), outs.size());
+        for (size_t i = 0; i < outs.size(); i++)
+            check_shape(outs[i], af_sensevoice_out_frames(h, audios[i].shape(0)),
+                        af_sensevoice_feat_dim(h));
+        return run_many(audios, [&](size_t i) {
+            return af_sensevoice_fbank(h, audios[i].data(), audios[i].shape(0), outs[i].data());
+        });
     }
 
     nb::object fbank_raw(Audio audio, OutArg out) {
@@ -301,7 +386,15 @@ NB_MODULE(_ext, m) {
         .def("log_mel_padded", &Whisper::log_mel_padded, "audio"_a, "n_padded"_a,
              nb::arg("out").none().noconvert() = nb::none(),
              "Log-mel spectrogram of `audio` followed by zeros up to `n_padded` samples, "
-             "(n_mels, n_padded // 160). Needs pad_or_trim=False.");
+             "(n_mels, n_padded // 160). Needs pad_or_trim=False.")
+        .def("log_mel_many", &Whisper::log_mel_many, nb::arg("audios").noconvert(),
+             nb::arg("outs").noconvert(),
+             "log_mel(audios[i], out=outs[i]) for every i with one GIL release (batch chunks). "
+             "Stops at the first item with a NaN / inf sample and returns its index (else -1).")
+        .def("log_mel_padded_many", &Whisper::log_mel_padded_many, nb::arg("audios").noconvert(),
+             "n_padded"_a, nb::arg("outs").noconvert(),
+             "log_mel_padded(audios[i], n_padded, out=outs[i]) for every i with one GIL release; "
+             "returns as log_mel_many.");
 
     nb::class_<SenseVoice>(m, "SenseVoiceFrontend")
         .def(nb::init<int, int, int, float, unsigned long long, std::optional<Vec>,
@@ -323,5 +416,9 @@ NB_MODULE(_ext, m) {
              "None.")
         .def("fbank_raw", &SenseVoice::fbank_raw, "audio"_a,
              nb::arg("out").none().noconvert() = nb::none(),
-             "Raw kaldi fbank (raw_frames, n_mels). With `out`, writes into it and returns None.");
+             "Raw kaldi fbank (raw_frames, n_mels). With `out`, writes into it and returns None.")
+        .def("fbank_many", &SenseVoice::fbank_many, nb::arg("audios").noconvert(),
+             nb::arg("outs").noconvert(),
+             "fbank(audios[i], out=outs[i]) for every i with one GIL release (batch chunks); "
+             "returns as WhisperFrontend.log_mel_many.");
 }

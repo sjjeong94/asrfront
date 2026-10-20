@@ -7,6 +7,7 @@ ffmpeg in every supported codec and compares with whisper's exact ffmpeg command
 
 from __future__ import annotations
 
+import re
 import struct
 import subprocess
 import wave
@@ -97,6 +98,60 @@ def test_raw_pcm(tmp_path):
 @pytest.mark.parametrize("pattern", [b"\xff\xff", b"\xff\xfb", b"\xff\xfb\x90\x64", b"\x00\x00"])
 def test_raw_bytes_not_mistaken_for_mp3(pattern):
     data = pattern * (8192 // len(pattern))
+    assert len(asrfront.load(data)) == len(data) // 2
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [bytes(64), b"\x01\x02junk\xff\xfb", bytes(1000) + b"\xff" * 3],
+    ids=["zeros", "junk", "long"],
+)
+@pytest.mark.parametrize("corpus", ["cbr.mp3", "vbr_stereo.mp3", "no_xing.mp3"])
+def test_mp3_after_leading_junk(tmp_path, prefix, corpus):
+    """Bytes before the first frame (ffmpeg resyncs past them) are skipped, also after an ID3
+    tag, instead of failing (path) or decoding the file as raw PCM (bytes)."""
+    mp3 = (Path(__file__).parent.parent / "fuzz" / "corpus" / corpus).read_bytes()
+    if mp3[:3] == b"ID3":  # the junk goes before the first frame: drop the file's own tag
+        mp3 = mp3[10 + sum(b << (21 - 7 * i) for i, b in enumerate(mp3[6:10])) :]
+    expected = asrfront.load(mp3)
+    assert len(expected) > 0
+    np.testing.assert_array_equal(asrfront.load(prefix + mp3), expected)
+    path = tmp_path / "a.mp3"
+    path.write_bytes(prefix + mp3)
+    np.testing.assert_array_equal(asrfront.load(path), expected)
+    id3 = b"ID3\x03\x00\x00\x00\x00\x00\x0a" + bytes(10)  # an empty 10-byte tag body
+    np.testing.assert_array_equal(asrfront.load(id3 + prefix + mp3), expected)
+
+
+def test_mp3_scan_is_bounded(tmp_path):
+    # frames are searched for in the first 64 KiB only
+    mp3 = (Path(__file__).parent.parent / "fuzz" / "corpus" / "cbr.mp3").read_bytes()
+    path = tmp_path / "a.mp3"
+    path.write_bytes(bytes(70000) + mp3)
+    with pytest.raises(ValueError, match="no known container header"):
+        asrfront.load(path)
+
+
+@pytest.mark.parametrize(
+    "data, name",
+    [
+        (b"\0\0\0\x20ftypM4A " + bytes(4000), "MP4 / M4A"),
+        (b"OggS" + bytes(4000), "Ogg"),
+        (b"\x1a\x45\xdf\xa3" + bytes(4000), "Matroska / WebM"),
+        (b"RIFF\0\x10\0\0AVI " + bytes(4000), "AVI"),
+        (b"#!AMR\n" + bytes(4000), "AMR"),
+        ((b"\xff\xf1\x50\x80\x01\x00\xfc" + bytes(1)) * 500, "AAC"),
+    ],
+)
+def test_unsupported_bytes_not_raw_pcm(data, name):
+    """Bytes of a known unsupported container raise instead of decoding as raw PCM noise."""
+    with pytest.raises(ValueError, match=f"unsupported audio format \\({re.escape(name)}"):
+        asrfront.load(data)
+
+
+def test_raw_bytes_not_mistaken_for_aac():
+    # an ADTS-like sync word whose frame length does not lead to a second one: raw PCM
+    data = b"\xff\xf1\x50\x80\x01\x00\xfc" + bytes(8193)
     assert len(asrfront.load(data)) == len(data) // 2
 
 

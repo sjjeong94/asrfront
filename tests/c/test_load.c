@@ -298,6 +298,13 @@ static void test_error_details(void) {
     expect_err("not audio", 9, AF_RAW_NEVER, AF_EUNSUPPORTED, "no known container header");
     expect_err("\0\0\0 ftypM4A ", 12, AF_RAW_NEVER, AF_EUNSUPPORTED, "MP4 / M4A container");
     expect_err("OggS\0\2", 6, AF_RAW_NEVER, AF_EUNSUPPORTED, "Ogg (Vorbis / Opus) container");
+    /* bytes input: a known unsupported container is an error, not raw PCM noise */
+    expect_err("\0\0\0 ftypM4A ", 12, AF_RAW_AUTO, AF_EUNSUPPORTED, "MP4 / M4A container");
+    expect_err("RIFF\0\0\0\0AVI LIST", 16, AF_RAW_AUTO, AF_EUNSUPPORTED, "AVI container");
+    const uint8_t adts[16] = {0xFF, 0xF1, 0x50, 0x80, 0x01, 0x00, 0xFC, 0,
+                              0xFF, 0xF1, 0x50, 0x80, 0x01, 0x00, 0xFC, 0}; /* two 8-byte frames */
+    expect_err(adts, sizeof adts, AF_RAW_AUTO, AF_EUNSUPPORTED, "AAC (ADTS) container");
+    expect_err(adts, 8, AF_RAW_AUTO, AF_OK, ""); /* one sync word alone may be PCM */
     expect_err("fLaC\0\0\0\x22", 8, AF_RAW_AUTO, AF_ECORRUPT, "FLAC");
     /* bytes from the file are sanitized to printable ASCII */
     uint8_t caf[64] = "caff\0\1\0\0desc\0\0\0\0\0\0\0\x20";

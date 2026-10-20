@@ -41,6 +41,11 @@ int af_mp3_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
             break;
         n += (size_t)got;
     }
+    if (pcm && n > 0 && n < cap) { /* give back the growth slack */
+        float *shrunk = realloc(pcm, n * (size_t)ch * sizeof(float));
+        if (shrunk)
+            pcm = shrunk;
+    }
     out->fmt = AF_SFMT_F32;
     out->n_frames = n;
     af_default_layout(ch, out->layout);

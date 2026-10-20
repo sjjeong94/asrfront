@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import pytest
 
@@ -134,6 +136,21 @@ def test_rejects_non_finite(fn, value):
         fn(audio)
 
 
+def test_pad_or_trim_uses_only_the_first_30_s():
+    audio = np.random.default_rng(0).standard_normal(3 * 480000) * 0.1  # float64, 90 s
+    expected = log_mel(audio[:480000].astype(np.float32))
+    audio[480000] = np.nan  # dropped by pad_or_trim, as in whisper: not an error
+    np.testing.assert_array_equal(log_mel(audio), expected)
+    np.testing.assert_array_equal(log_mel_batch([audio, audio])[1], expected)
+    with pytest.raises(ValueError, match="NaN or inf"):
+        log_mel(audio, pad_or_trim=False)
+    audio[479999] = np.inf
+    with pytest.raises(ValueError, match="index 479999"):
+        log_mel(audio)
+    with pytest.raises(ValueError, match=r"audios\[0\] .*index 479999"):
+        log_mel_batch([audio])
+
+
 def test_batch_rejects_non_finite():
     items = [np.zeros(16000, np.float32), np.full(16000, np.nan, np.float32)]
     with pytest.raises(ValueError, match=r"audios\[1\] contains NaN or inf"):
@@ -151,7 +168,8 @@ def test_batch_non_finite_error_is_the_lowest_index(n_threads):
         items[i][5] = np.nan
     items[5] = np.zeros(16000)  # float64, converted in a worker
     items[5][77] = 1e40
-    for fn in (log_mel_batch, fbank_batch, asrfront.qwen3_asr.log_mel_batch):
+    hf = functools.partial(asrfront.qwen3_asr.log_mel_batch, hf_padding=True)
+    for fn in (log_mel_batch, fbank_batch, asrfront.qwen3_asr.log_mel_batch, hf):
         with pytest.raises(ValueError, match=r"audios\[3\] contains NaN or inf \(first at index 5"):
             fn(items, n_threads=n_threads)
         with pytest.raises(ValueError, match=r"audios\[4\] .*index 77, value .*1e\+40"):
@@ -428,7 +446,8 @@ def test_batch_at_interpreter_shutdown(warm):
     code = f"""
 import atexit
 import numpy as np
-from asrfront import sensevoice, whisper
+from asrfront import _audio, sensevoice, whisper
+_audio._MIN_COST_PER_THREAD = 1  # threads even for these small inputs
 x = np.random.default_rng(0).standard_normal(16000).astype(np.float32) * 0.1
 if {warm}:
     whisper.log_mel_batch([x] * 4, n_threads=4)
@@ -442,6 +461,47 @@ atexit.register(at_exit)
 """
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
+def test_plan_chunks(monkeypatch):
+    from asrfront import _audio
+
+    monkeypatch.setattr(_audio, "_MIN_COST_PER_THREAD", 512000)
+    monkeypatch.setattr(_audio, "_ITEM_COST", 2000)
+    # little work stays on one thread, in one chunk, whatever n_threads says
+    assert _audio.plan_chunks([1600] * 256, None) == ([range(256)], 1)
+    assert _audio.plan_chunks([1600] * 256, 16) == ([range(256)], 1)
+    assert _audio.plan_chunks([], None) == ([], 1)
+    # enough work: workers by total cost, ~4 contiguous chunks each, covering every item once
+    chunks, workers = _audio.plan_chunks([160000] * 64, 4)
+    assert workers == 4 and len(chunks) == 16
+    assert [i for c in chunks for i in c] == list(range(64))
+    # unequal items: chunks of about equal cost, not of equal item counts
+    costs = [10**6] * 4 + [1000] * 400
+    chunks, workers = _audio.plan_chunks(costs, 2)
+    assert workers == 2 and [i for c in chunks for i in c] == list(range(404))
+    assert len(chunks[0]) == 1 and len(chunks[-1]) > 100
+    with pytest.raises(ValueError, match="n_threads"):
+        _audio.plan_chunks([1], 0)
+
+
+def test_batch_many_chunk_errors(sigs):
+    fe = _ext.WhisperFrontend(pad_or_trim=False)
+    a = sigs["speech"][:16000]
+    with pytest.raises(ValueError, match="same length"):
+        fe.log_mel_many([a, a], [np.zeros((80, 100), np.float32)])
+    with pytest.raises(ValueError, match=r"expected \(80, 100\)"):
+        fe.log_mel_many([a], [np.zeros((80, 99), np.float32)])
+    with pytest.raises(TypeError):  # never a converted copy that would drop the results
+        fe.log_mel_many([a], [np.zeros((80, 100), np.float64)])
+    with pytest.raises(TypeError):
+        fe.log_mel_many([a.astype(np.float64)], [np.zeros((80, 100), np.float32)])
+    sv = _ext.SenseVoiceFrontend()
+    with pytest.raises(ValueError, match="expected"):
+        sv.fbank_many([a], [np.zeros((3, 560), np.float32)])
+    out = np.zeros((2, 80, 100), np.float32)
+    fe.log_mel_many([a, a[::-1].copy()], list(out))
+    np.testing.assert_array_equal(out[1], fe.log_mel(a[::-1].copy()))
 
 
 def test_run_parallel_nested_does_not_deadlock(sigs):

@@ -146,10 +146,17 @@ The container is detected from magic bytes. Raw PCM (always s16le, 16 kHz, mono)
 
 - The bytes fallback means garbage bytes decode as noise instead of raising. This is accepted
   because raw PCM bytes (streaming / websocket audio) are the main reason to pass bytes without
-  a container. Truncated or corrupt containers (magic present) still raise.
+  a container. Truncated or corrupt containers (magic present) still raise, and so do the
+  common containers that are not decoded (MP4 / M4A, Ogg, Matroska / WebM, ASF, RIFX, AVI and
+  other non-WAVE RIFF, AMR, and AAC ADTS confirmed by a second frame header): their uploads
+  would otherwise come out as noise. Only signatures that s16le audio practically never starts
+  with are used; anything else (e.g. an HTML error page) still decodes as raw PCM.
 - MPEG detection is strict so that raw PCM is never taken for MP3 (int16 `-1` is `FF FF`, which
   looks like a frame sync): a valid Layer III header **and** a consistent second header at the
-  computed frame offset are required (an ID3v2 tag is skipped first).
+  computed frame offset are required (an ID3v2 tag is skipped first). If nothing else matched,
+  frames are also searched for in the first 64 KiB (past the ID3v2 tag), since ffmpeg resyncs
+  past leading junk such as zero padding; there three consecutive consistent frames are
+  required (or two that end the file), and decoding starts at the first.
 
 ### License policy (clean-room style)
 

@@ -69,7 +69,10 @@ int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
     /* Decode as left-justified s32, growing the buffer: the header's total may be 0 (unknown)
      * or larger than what a truncated file holds. It is a hint only, never trusted beyond the
      * input size: a 10 kB file claiming 2^28 frames must not allocate gigabytes up front. */
-    size_t cap = 65536 + size; /* frames; enough for any common compression ratio */
+    /* frames: the file at 4:1 compression (which covers most audio; quieter or simpler signals
+     * compress further and grow the buffer). Not more per byte of file for more channels or
+     * bits: 8-channel 32-bit audio must not reserve 32 bytes per byte of file up front. */
+    size_t cap = 65536 + size / ((size_t)ch * (size_t)((bps + 7) / 8)) * 4;
     /* One frame more than the header's total, so that a truthful total ends with a short read
      * (n < cap) instead of growing the full buffer just before EOF. */
     if (f->totalPCMFrameCount > 0 && f->totalPCMFrameCount < cap)
@@ -105,19 +108,30 @@ int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
         return AF_ETOOLONG;
     }
 
+    const size_t total = n * (size_t)ch;
+    size_t bytes = total * sizeof(int32_t);
     if (bps <= 16) { /* ffmpeg decodes up to 16 bits as s16 (left-justified) */
-        int16_t *s = malloc(n * (size_t)ch * sizeof(int16_t) + 1);
-        if (!s)
-            rc = AF_ENOMEM;
-        else
-            for (size_t i = 0; i < n * (size_t)ch; i++)
-                s[i] = (int16_t)(pcm[i] / 65536); /* exact: the low 16 bits are zero */
-        free(pcm);
+        /* In place, a block at a time through a small buffer: block b's s16 output ends at
+         * 2 (b + 1) B bytes, before the s32 input of block b + 1 starts at 4 (b + 1) B, and a
+         * block is read completely before it is written. */
+        enum { B = 4096 };
+        int16_t tmp[B];
+        for (size_t i0 = 0; i0 < total; i0 += B) {
+            const size_t len = total - i0 < B ? total - i0 : B;
+            for (size_t i = 0; i < len; i++)
+                tmp[i] = (int16_t)(pcm[i0 + i] / 65536); /* exact: the low 16 bits are zero */
+            memcpy((char *)pcm + i0 * sizeof(int16_t), tmp, len * sizeof(int16_t));
+        }
+        bytes = total * sizeof(int16_t);
         out->fmt = AF_SFMT_S16;
-        out->data = s;
     } else {
         out->fmt = AF_SFMT_S32;
-        out->data = pcm;
     }
+    if (bytes < cap * (size_t)ch * sizeof(int32_t)) { /* growth slack, s32 half if converted */
+        void *shrunk = realloc(pcm, bytes > 0 ? bytes : 1);
+        if (shrunk)
+            pcm = shrunk;
+    }
+    out->data = pcm;
     return rc;
 }

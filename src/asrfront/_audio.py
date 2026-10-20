@@ -10,6 +10,8 @@ import numpy as np
 
 T = TypeVar("T")
 
+SAMPLE_RATE = 16000
+
 _local = threading.local()
 
 # Native handles kept per thread (see cached_frontend). Small: a call rarely alternates
@@ -67,16 +69,23 @@ def check_audio(audio: Any, name: str = "audio") -> np.ndarray:
     raise TypeError(f"{name} must be a float or int16 array, got dtype {a.dtype}")
 
 
-def convert_audio(a: np.ndarray, name: str = "audio") -> np.ndarray:
-    """The rest of :func:`as_audio` for an array that passed :func:`check_audio`: the cast to
-    float32 and the NaN / inf check (a pass over the samples)."""
+def cast_audio(a: np.ndarray) -> np.ndarray:
+    """The cast to contiguous float32 of :func:`convert_audio`, without the NaN / inf check
+    (float64 values beyond the float32 range become inf)."""
     if a.dtype.kind == "i":  # int16 in either byte order
         # one pass; the same values as astype(float32) / 32768 (a power of two)
         pcm: np.ndarray = np.multiply(a, np.float32(1.0 / 32768.0), dtype=np.float32)
         return pcm
-    with np.errstate(over="ignore"):  # out-of-range values become inf, rejected below
-        out = np.ascontiguousarray(a, dtype=np.float32)
-    if not np.isfinite(out).all():
+    with np.errstate(over="ignore"):
+        out: np.ndarray = np.ascontiguousarray(a, dtype=np.float32)
+    return out
+
+
+def convert_audio(a: np.ndarray, name: str = "audio") -> np.ndarray:
+    """The rest of :func:`as_audio` for an array that passed :func:`check_audio`: the cast to
+    float32 and the NaN / inf check (a pass over the samples)."""
+    out = cast_audio(a)
+    if a.dtype.kind == "f" and not np.isfinite(out).all():
         bad = int(np.flatnonzero(~np.isfinite(out))[0])
         raise ValueError(
             f"{name} contains NaN or inf (first at index {bad}, value {a[bad]!r}); "
@@ -205,30 +214,79 @@ def run_parallel(fn: Callable[[int], None], n_items: int, n_threads: int | None)
         f.result()  # re-raises the first worker exception
 
 
+# Batch scheduling (run_batch). Costs are in samples of work (16 kHz). A thread is used only
+# for at least _MIN_COST_PER_THREAD (~0.1 s of compute) and each item counts _ITEM_COST more:
+# below that, waking workers and passing the GIL between them costs more than they save (256
+# items of 0.1 s were 6x slower on 16 threads than on one). Each worker gets about
+# _CHUNKS_PER_THREAD chunks, so unequal items still balance.
+_MIN_COST_PER_THREAD = 32 * SAMPLE_RATE
+_ITEM_COST = 2000
+_CHUNKS_PER_THREAD = 4
+
+
+def plan_chunks(costs: list[int], n_threads: int | None) -> tuple[list[range], int]:
+    """Split items 0..len(costs)-1 into contiguous chunks of about equal cost, and choose the
+    worker count: at most ``n_threads`` (``None``: every core), fewer for little work."""
+    n = len(costs)
+    workers = resolve_threads(n_threads, n)  # validates n_threads, also for empty batches
+    total = sum(costs) + n * _ITEM_COST
+    workers = max(1, min(workers, total // _MIN_COST_PER_THREAD))
+    if workers == 1:
+        return ([range(n)] if n else []), 1
+    target = total / (workers * _CHUNKS_PER_THREAD)
+    chunks: list[range] = []
+    start, acc = 0, 0.0
+    for i, c in enumerate(costs):
+        acc += c + _ITEM_COST
+        if acc >= target:
+            chunks.append(range(start, i + 1))
+            start, acc = i + 1, 0.0
+    if start < n:
+        chunks.append(range(start, n))
+    return chunks, min(workers, len(chunks))
+
+
 def run_batch(
-    fn: Callable[[int, np.ndarray], None], items: list[np.ndarray], n_threads: int | None
+    fn: Callable[[range, list[np.ndarray]], int],
+    items: list[np.ndarray],
+    n_threads: int | None,
+    costs: list[int] | None = None,
 ) -> None:
-    """Run fn(i, convert_audio(items[i])) for the items of :func:`check_audio_list` on the
-    pool. The conversion (cast, NaN / inf check) runs in the workers too, so this pass over
-    the samples is parallel; a NaN / inf error is raised after the batch, for the lowest such
-    index, as a serial check would have raised it. Items after a known bad one are skipped."""
+    """Run fn(chunk, [cast_audio(items[i]) for i in chunk]) over contiguous chunks of the items
+    of :func:`check_audio_list` on the pool. fn computes a whole chunk with one native call (the
+    *_many methods), so that a worker passes the GIL once per chunk rather than once per item,
+    and returns what that call returns: the position in the chunk of the first item with a
+    NaN / inf sample (checked natively, without the GIL), or -1. ``costs`` (default: the item
+    lengths) size the chunks and the worker count (:func:`plan_chunks`).
+
+    A NaN / inf error is raised after the batch, for the lowest such index, with the message
+    of :func:`convert_audio`, as a serial check would have raised it; a chunk stops at its
+    first bad item, and chunks after a known bad one are skipped."""
+    chunks, workers = plan_chunks(
+        [a.shape[0] for a in items] if costs is None else costs, n_threads
+    )
     errors: list[ValueError | None] = [None] * len(items)
     first_bad = [len(items)]
     lock = threading.Lock()
 
-    def work(i: int) -> None:
-        if i > first_bad[0]:
+    def work(c: int) -> None:
+        chunk = chunks[c]
+        if chunk.start > first_bad[0]:
             return
+        bad = fn(chunk, [cast_audio(items[i]) for i in chunk])
+        if bad < 0:
+            return
+        i = chunk.start + bad
         try:
-            audio = convert_audio(items[i], f"audios[{i}]")
+            convert_audio(items[i], f"audios[{i}]")  # the error, with the sample's details
         except ValueError as e:
             errors[i] = e
             with lock:
                 first_bad[0] = min(first_bad[0], i)
             return
-        fn(i, audio)
+        raise AssertionError(f"audios[{i}]: no NaN / inf found")  # pragma: no cover
 
-    run_parallel(work, len(items), n_threads)
+    run_parallel(work, len(chunks), workers)
     if first_bad[0] < len(items):
         raise errors[first_bad[0]]  # type: ignore[misc]
 

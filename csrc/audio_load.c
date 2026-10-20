@@ -54,7 +54,40 @@ static size_t mp3_frame_len(const uint8_t *p, uint32_t *key) {
     return (size_t)((version == 3 ? 144000 : 72000) * kb / sr + pad);
 }
 
-static container detect(const uint8_t *buf, size_t size) {
+/* MPEG audio after leading junk (zero padding, garbage between an ID3 tag and the first frame;
+ * ffmpeg resyncs past it) is searched for this far. */
+#define MP3_SCAN_BYTES 65536
+
+/* Offset of the first of three consecutive consistent Layer III frames starting in
+ * [from, from + MP3_SCAN_BYTES), or of two that end exactly at the end of the file; SIZE_MAX
+ * if there is none. One more frame than at the start of the file, since a match anywhere in
+ * the window is accepted and raw PCM must still never be taken for MP3. */
+static size_t mp3_find(const uint8_t *buf, size_t size, size_t from) {
+    const size_t end = size - from > MP3_SCAN_BYTES ? from + MP3_SCAN_BYTES : size;
+    for (size_t pos = from; pos < end && size - pos >= 4; pos++) {
+        const uint8_t *ff = memchr(buf + pos, 0xFF, end - pos);
+        if (!ff)
+            break;
+        pos = (size_t)(ff - buf);
+        if (size - pos < 4)
+            break;
+        uint32_t k1, k;
+        size_t len = mp3_frame_len(buf + pos, &k1), next = pos + len;
+        int n = 1;
+        while (len >= 4 && n < 3 && next <= size - 4 && (len = mp3_frame_len(buf + next, &k)) &&
+               k == k1) {
+            next += len;
+            n++;
+        }
+        if (n == 3 || (n == 2 && next == size))
+            return pos;
+    }
+    return SIZE_MAX;
+}
+
+/* *mp3_off: where the MPEG audio decoder starts (past leading junk, see mp3_find). */
+static container detect(const uint8_t *buf, size_t size, size_t *mp3_off) {
+    *mp3_off = 0;
     if (size >= 12 && memcmp(buf + 8, "WAVE", 4) == 0 &&
         (memcmp(buf, "RIFF", 4) == 0 || memcmp(buf, "RF64", 4) == 0 || memcmp(buf, "BW64", 4) == 0))
         return FMT_WAV;
@@ -85,6 +118,11 @@ static container detect(const uint8_t *buf, size_t size) {
                 return FMT_MP3;
         }
     }
+    const size_t at = mp3_find(buf, size, off);
+    if (at != SIZE_MAX) {
+        *mp3_off = at;
+        return FMT_MP3;
+    }
     return FMT_UNKNOWN;
 }
 
@@ -96,8 +134,20 @@ static const char *const container_names[] = {
     "raw PCM", "WAV", "Wave64", "AIFF", "CAF", "NIST SPHERE", "FLAC", "MP3",
 };
 
-/* Common containers that are not decoded, named in the error instead of "no known header". */
-static const char *unsupported_container(const uint8_t *buf, size_t size) {
+/* AAC in ADTS framing: a frame header whose length leads to a second one, so that raw PCM
+ * starting with the bytes FF F0 / FF F1 / FF F8 / FF F9 is not taken for AAC. */
+static int adts_frames(const uint8_t *buf, size_t size) {
+    if (size < 7 || buf[0] != 0xFF || (buf[1] & 0xF6) != 0xF0)
+        return 0;
+    size_t len = ((size_t)(buf[3] & 0x03) << 11) | ((size_t)buf[4] << 3) | (buf[5] >> 5);
+    return len >= 7 && len <= size - 2 && buf[len] == 0xFF && (buf[len + 1] & 0xF6) == 0xF0;
+}
+
+/* Common containers that are not decoded, named in the error instead of "no known header".
+ * Also checked for bytes input (AF_RAW_AUTO, `strict`) before falling back to raw PCM, so only
+ * signatures that headerless s16le audio practically never starts with; there an ADTS sync
+ * word must be confirmed by a second frame. */
+static const char *unsupported_container(const uint8_t *buf, size_t size, int strict) {
     if (size >= 8 && memcmp(buf + 4, "ftyp", 4) == 0)
         return "MP4 / M4A";
     if (size >= 4 && memcmp(buf, "OggS", 4) == 0)
@@ -108,7 +158,11 @@ static const char *unsupported_container(const uint8_t *buf, size_t size) {
         return "ASF / WMA";
     if (size >= 4 && memcmp(buf, "RIFX", 4) == 0)
         return "big-endian RIFX WAV";
-    if (size >= 2 && buf[0] == 0xFF && (buf[1] & 0xF6) == 0xF0)
+    if (size >= 12 && memcmp(buf, "RIFF", 4) == 0)
+        return memcmp(buf + 8, "AVI ", 4) == 0 ? "AVI" : "RIFF (not WAVE)";
+    if (size >= 6 && memcmp(buf, "#!AMR", 5) == 0)
+        return "AMR";
+    if (strict ? adts_frames(buf, size) : size >= 2 && buf[0] == 0xFF && (buf[1] & 0xF6) == 0xF0)
         return "AAC (ADTS)";
     return NULL;
 }
@@ -120,7 +174,7 @@ static void describe(int rc, container fmt, const uint8_t *buf, size_t size, int
         return;
     const char *name = container_names[fmt];
     if (raw_never) {
-        const char *other = unsupported_container(buf, size);
+        const char *other = unsupported_container(buf, size, 0);
         if (other)
             snprintf(err, err_size, "%s container", other);
         else
@@ -154,7 +208,8 @@ int af_load_memory_ex(const void *buf_, size_t size, af_raw_mode raw, size_t max
     af_decoded d;
     memset(&d, 0, sizeof d);
     int rc;
-    container fmt = raw == AF_RAW_FORCE ? FMT_UNKNOWN : detect(buf, size);
+    size_t mp3_off = 0;
+    container fmt = raw == AF_RAW_FORCE ? FMT_UNKNOWN : detect(buf, size, &mp3_off);
     switch (fmt) {
     case FMT_WAV:
         rc = af_wav_decode(buf, size, max_samples, &d);
@@ -175,10 +230,11 @@ int af_load_memory_ex(const void *buf_, size_t size, af_raw_mode raw, size_t max
         rc = af_flac_decode(buf, size, max_samples, &d);
         break;
     case FMT_MP3:
-        rc = af_mp3_decode(buf, size, max_samples, &d);
+        rc = af_mp3_decode(buf + mp3_off, size - mp3_off, max_samples, &d);
         break;
     default:
-        if (raw == AF_RAW_NEVER) {
+        /* bytes of a known but unsupported container would decode as raw PCM noise */
+        if (raw == AF_RAW_NEVER || (raw == AF_RAW_AUTO && unsupported_container(buf, size, 1))) {
             describe(AF_EUNSUPPORTED, fmt, buf, size, 1, &d, err, err_size);
             return AF_EUNSUPPORTED;
         }

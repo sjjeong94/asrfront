@@ -6,6 +6,7 @@ float32 array of the exact output shape (it is never converted or copied);
 ``WhisperFrontend.log_mel`` also takes rows spaced apart, e.g. ``a[:, :n]``.
 """
 
+from collections.abc import Sequence
 from typing import Any, overload
 
 import numpy as np
@@ -35,6 +36,10 @@ class WhisperFrontend:
     def log_mel_padded(self, audio: _F32, n_padded: int, out: None = None) -> _F32: ...
     @overload
     def log_mel_padded(self, audio: _F32, n_padded: int, out: _F32) -> None: ...
+    def log_mel_many(self, audios: Sequence[_F32], outs: Sequence[_F32]) -> int: ...
+    def log_mel_padded_many(
+        self, audios: Sequence[_F32], n_padded: int, outs: Sequence[_F32]
+    ) -> int: ...
 
 class SenseVoiceFrontend:
     def __init__(
@@ -58,6 +63,7 @@ class SenseVoiceFrontend:
     def fbank(self, audio: _F32, out: None = None) -> _F32: ...
     @overload
     def fbank(self, audio: _F32, out: _F32) -> None: ...
+    def fbank_many(self, audios: Sequence[_F32], outs: Sequence[_F32]) -> int: ...
     @overload
     def fbank_raw(self, audio: _F32, out: None = None) -> _F32: ...
     @overload

@@ -191,7 +191,8 @@ def fbank_batch(
         audios: sequence of 1-D waveforms (any lengths), or a 2-D ``(B, N)`` array.
         cmvn, n_mels, lfr_m, lfr_n, dither, seed: as in :func:`fbank`; every item is
             processed exactly as an individual :func:`fbank` call would.
-        n_threads: worker threads; ``None`` uses all available cores.
+        n_threads: at most this many worker threads (fewer for little audio); ``None``: all
+            available cores.
 
     Returns:
         ``(feats, lengths)``: float32 ``(B, max_len, n_mels * lfr_m)`` zero-padded after
@@ -207,9 +208,9 @@ def fbank_batch(
     max_len = int(lengths.max()) if len(items) else 0
     feats = np.zeros((len(items), max_len, fe.feat_dim), dtype=np.float32)
 
-    def work(i: int, audio: np.ndarray) -> None:
+    def work(chunk: range, audios: list[np.ndarray]) -> int:
         fe_i = _frontend(n_mels, lfr_m, lfr_n, cmvn_v, dither, seed)
-        fe_i.fbank(audio, out=feats[i, : lengths[i]])
+        return fe_i.fbank_many(audios, [feats[i, : lengths[i]] for i in chunk])
 
     run_batch(work, items, n_threads)
     return feats, lengths
