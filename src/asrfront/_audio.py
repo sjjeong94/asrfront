@@ -8,6 +8,8 @@ from typing import Any, Callable, TypeVar, cast
 
 import numpy as np
 
+from . import _ext
+
 T = TypeVar("T")
 
 SAMPLE_RATE = 16000
@@ -85,7 +87,8 @@ def convert_audio(a: np.ndarray, name: str = "audio") -> np.ndarray:
     """The rest of :func:`as_audio` for an array that passed :func:`check_audio`: the cast to
     float32 and the NaN / inf check (a pass over the samples)."""
     out = cast_audio(a)
-    if a.dtype.kind == "f" and not np.isfinite(out).all():
+    # natively (no bool temporary, no GIL); the index is only searched for the error message
+    if a.dtype.kind == "f" and not _ext.all_finite(out):
         bad = int(np.flatnonzero(~np.isfinite(out))[0])
         raise ValueError(
             f"{name} contains NaN or inf (first at index {bad}, value {a[bad]!r}); "

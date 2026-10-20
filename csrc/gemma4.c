@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,6 +95,8 @@ static void block(af_gemma4 *h, const float *audio, size_t t0, int count, float 
 int af_gemma4_log_mel(af_gemma4 *h, const float *audio, size_t n_samples, size_t n_frames,
                       float *out) {
     if (!h || (!out && n_frames) || (!audio && n_samples))
+        return AF_EINVAL;
+    if (n_frames > SIZE_MAX / (G4_N_MELS * sizeof(float))) /* no buffer can be that large */
         return AF_EINVAL;
     size_t valid = af_gemma4_valid_frames(n_samples);
     valid = valid < n_frames ? valid : n_frames;

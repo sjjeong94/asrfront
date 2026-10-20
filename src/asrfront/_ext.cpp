@@ -5,6 +5,8 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/vector.h>
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -58,6 +60,10 @@ static void check(int rc) {
 // Allocate a (rows, cols) float32 buffer, fill it with fn(buf) without the
 // GIL, and hand ownership to a numpy array (zero-copy).
 template <typename F> static Out2D compute_2d(size_t rows, size_t cols, F &&fn) {
+    if (cols && rows > SIZE_MAX / sizeof(float) / cols)
+        throw nb::value_error(("output of shape (" + std::to_string(rows) + ", " +
+                               std::to_string(cols) + ") is too large")
+                                  .c_str());
     float *buf = new float[rows * cols > 0 ? rows * cols : 1];
     nb::capsule owner(buf, [](void *p) noexcept { delete[] static_cast<float *>(p); });
     int rc;
@@ -101,6 +107,23 @@ static bool all_finite(const float *x, size_t n) {
     }
     return true;
 }
+
+// The C handles are not thread-safe and the methods run without the GIL, so concurrent calls
+// on one object would silently share its scratch buffers: refuse them instead. Held by every
+// method that computes, for the whole call.
+class Busy {
+    std::atomic<bool> &flag;
+
+  public:
+    explicit Busy(std::atomic<bool> &f) : flag(f) {
+        if (flag.exchange(true, std::memory_order_acquire))
+            throw std::runtime_error("asrfront: a frontend object was used by two threads at "
+                                     "once; use one object per thread");
+    }
+    ~Busy() { flag.store(false, std::memory_order_release); }
+    Busy(const Busy &) = delete;
+    Busy &operator=(const Busy &) = delete;
+};
 
 // Batch chunks (the *_many methods): one GIL release for all items, since per-item releases
 // (and the NaN / inf check in numpy) make worker threads queue for the GIL when items are
@@ -147,6 +170,7 @@ static nb::object compute_into(size_t rows, size_t cols, OutArg &out, F &&fn) {
 struct Whisper {
     af_whisper *h = nullptr;
     int n_mels;
+    std::atomic<bool> busy{false};
 
     Whisper(int n_mels_, bool pad_or_trim, int n_threads) : n_mels(n_mels_) {
         af_whisper_config cfg;
@@ -161,6 +185,7 @@ struct Whisper {
     Whisper &operator=(const Whisper &) = delete;
 
     nb::object log_mel(Audio audio, OutRows out) {
+        Busy guard(busy);
         size_t n = audio.shape(0);
         size_t frames = af_whisper_out_frames(h, n);
         if (!out)
@@ -179,6 +204,7 @@ struct Whisper {
     }
 
     int64_t log_mel_many(const std::vector<Audio> &audios, const std::vector<Rows> &outs) {
+        Busy guard(busy);
         check_count(audios.size(), outs.size());
         std::vector<size_t> ld(outs.size());
         for (size_t i = 0; i < outs.size(); i++) {
@@ -193,6 +219,7 @@ struct Whisper {
     }
 
     nb::object log_mel_padded(Audio audio, size_t n_padded, OutArg out) {
+        Busy guard(busy);
         size_t n = audio.shape(0);
         return compute_into((size_t)n_mels, n_padded / 160, out, [&](float *o) {
             return af_whisper_log_mel_padded(h, audio.data(), n, n_padded, o);
@@ -201,6 +228,7 @@ struct Whisper {
 
     int64_t log_mel_padded_many(const std::vector<Audio> &audios, size_t n_padded,
                                 const std::vector<OutC> &outs) {
+        Busy guard(busy);
         check_count(audios.size(), outs.size());
         for (const OutC &o : outs)
             check_shape(o, (size_t)n_mels, n_padded / 160);
@@ -214,6 +242,7 @@ struct Whisper {
 struct SenseVoice {
     af_sensevoice *h = nullptr;
     int n_mels;
+    std::atomic<bool> busy{false};
 
     SenseVoice(int n_mels, int lfr_m, int lfr_n, float dither, unsigned long long seed,
                std::optional<Vec> cmvn_shift, std::optional<Vec> cmvn_scale, int n_threads)
@@ -242,12 +271,14 @@ struct SenseVoice {
     SenseVoice &operator=(const SenseVoice &) = delete;
 
     nb::object fbank(Audio audio, OutArg out) {
+        Busy guard(busy);
         size_t n = audio.shape(0);
         return compute_into(af_sensevoice_out_frames(h, n), af_sensevoice_feat_dim(h), out,
                             [&](float *o) { return af_sensevoice_fbank(h, audio.data(), n, o); });
     }
 
     int64_t fbank_many(const std::vector<Audio> &audios, const std::vector<OutC> &outs) {
+        Busy guard(busy);
         check_count(audios.size(), outs.size());
         for (size_t i = 0; i < outs.size(); i++)
             check_shape(outs[i], af_sensevoice_out_frames(h, audios[i].shape(0)),
@@ -258,6 +289,7 @@ struct SenseVoice {
     }
 
     nb::object fbank_raw(Audio audio, OutArg out) {
+        Busy guard(busy);
         size_t n = audio.shape(0);
         return compute_into(af_sensevoice_raw_frames(h, n), (size_t)n_mels, out, [&](float *o) {
             return af_sensevoice_fbank_raw(h, audio.data(), n, o);
@@ -267,6 +299,7 @@ struct SenseVoice {
 
 struct Gemma4 {
     af_gemma4 *h = nullptr;
+    std::atomic<bool> busy{false};
 
     Gemma4() { check(af_gemma4_create(&h)); }
     ~Gemma4() { af_gemma4_destroy(h); }
@@ -274,6 +307,7 @@ struct Gemma4 {
     Gemma4 &operator=(const Gemma4 &) = delete;
 
     nb::object log_mel(Audio audio, size_t n_frames, OutArg out) {
+        Busy guard(busy);
         size_t n = audio.shape(0);
         return compute_into(n_frames, 128, out, [&](float *o) {
             return af_gemma4_log_mel(h, audio.data(), n, n_frames, o);
@@ -282,6 +316,7 @@ struct Gemma4 {
 
     int64_t log_mel_many(const std::vector<Audio> &audios, size_t n_frames,
                          const std::vector<OutC> &outs) {
+        Busy guard(busy);
         check_count(audios.size(), outs.size());
         for (const OutC &o : outs)
             check_shape(o, n_frames, 128);
@@ -299,6 +334,18 @@ NB_MODULE(_ext, m) {
           "SIMD kernel variant used by newly created frontends ('avx2', 'generic' or "
           "'scalar'). ASRFRONT_KERNELS=generic|scalar forces the baseline / plain-C build; "
           "results are identical.");
+
+    m.def(
+        "all_finite",
+        [](Audio a) {
+            const size_t n = a.shape(0);
+            if (n < (1u << 16)) // short: cheaper than giving up and retaking the GIL
+                return all_finite(a.data(), n);
+            nb::gil_scoped_release release;
+            return all_finite(a.data(), n);
+        },
+        nb::arg("audio").noconvert(),
+        "Whether no sample of a contiguous float32 array is NaN or inf (without the GIL).");
 
     m.def(
         "_whisper_mel_filters",

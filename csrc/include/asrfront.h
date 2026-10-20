@@ -50,7 +50,7 @@ typedef struct af_whisper af_whisper;
 typedef struct af_whisper_config {
     int n_mels;      /* 80 | 128 */
     int pad_or_trim; /* nonzero: pad/trim input to 30 s -> 3000 frames */
-    int n_threads;   /* 0: auto, 1: single-threaded */
+    int n_threads;   /* reserved, must be >= 0; currently unused (the core is single-threaded) */
 } af_whisper_config;
 
 void af_whisper_default_config(af_whisper_config *cfg);
@@ -89,7 +89,7 @@ typedef struct af_sensevoice_config {
     unsigned long long seed; /* dither RNG seed */
     const float *cmvn_shift; /* NULL: no CMVN. Length n_mels * lfr_m. Copied. */
     const float *cmvn_scale; /* must be NULL iff cmvn_shift is NULL. Copied. */
-    int n_threads;           /* 0: auto, 1: single-threaded */
+    int n_threads;           /* reserved, must be >= 0; currently unused (single-threaded) */
 } af_sensevoice_config;
 
 void af_sensevoice_default_config(af_sensevoice_config *cfg);

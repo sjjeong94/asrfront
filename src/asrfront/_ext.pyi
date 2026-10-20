@@ -1,6 +1,7 @@
 """asrfront native extension (low-level; prefer asrfront.whisper / asrfront.sensevoice).
 
-Frontend objects are not thread-safe: use one per thread. Compute methods release the GIL.
+Frontend objects are not thread-safe: use one per thread (a call on an object that another
+thread is using raises RuntimeError). Compute methods release the GIL.
 Inputs must be C-contiguous float32 1-D arrays; ``out`` must be a writable C-contiguous
 float32 array of the exact output shape (it is never converted or copied);
 ``WhisperFrontend.log_mel`` also takes rows spaced apart, e.g. ``a[:, :n]``.
@@ -17,6 +18,7 @@ __version__: str
 _F32 = npt.NDArray[np.float32]
 
 def kernel_isa() -> str: ...
+def all_finite(audio: _F32) -> bool: ...
 def _whisper_mel_filters(n_mels: int) -> _F32: ...
 def _kaldi_mel_banks(n_mels: int) -> _F32: ...
 def load_memory(data: npt.NDArray[np.uint8], raw: int, max_samples: int = 0) -> _F32: ...
