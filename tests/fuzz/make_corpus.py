@@ -185,6 +185,8 @@ def main() -> None:
     flac[21] = (flac[21] & 0xF0) | (total >> 32)  # that once sized the first buffer (5.4 GB)
     flac[22:26] = (total & 0xFFFFFFFF).to_bytes(4, "big")
     seeds["regress_flac_huge_total.flac"] = bytes(flac)
+    # CAF data chunk size INT64_MIN: size - 4 once overflowed int64 (UBSan)
+    seeds["regress_caf_data_size_int64_min.caf"] = caf(pcm, data_size=-(1 << 63))
     for name, data in seeds.items():
         (OUT / name).write_bytes(data)
     total = sum(f.stat().st_size for f in OUT.iterdir())

@@ -181,14 +181,15 @@ int af_caf_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
             if (avail < 4)
                 return AF_ECORRUPT;
             /* 4 bytes of edit count, then the samples. A size of -1 (streamed), one that
-             * leaves no samples, or one beyond the file means "to the end of the file". */
-            int64_t n = (int64_t)ck_size - 4;
+             * leaves no samples, or one beyond the file means "to the end of the file".
+             * Unsigned: any size of 2^63 or more (negative as int64) is beyond the file. */
             data = body + 4;
-            if (n <= 0 || (uint64_t)n > avail - 4) {
+            if (ck_size <= 4 || ck_size - 4 > avail - 4) {
                 data_size = avail - 4;
                 break;
             }
-            data_size = (size_t)n; /* a later data chunk replaces this one, as in ffmpeg */
+            data_size =
+                (size_t)(ck_size - 4); /* a later data chunk replaces this one, as in ffmpeg */
         } else if (ck_size > avail) {
             if (data)
                 break; /* damaged trailing chunk */
