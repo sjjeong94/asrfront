@@ -6753,13 +6753,19 @@ static drflac_bool32 drflac__read_and_decode_metadata(drflac_read_proc onRead, d
 
                             /* Extract each track index. */
                             for (iIndex = 0; iIndex < indexCount; ++iIndex) {
-                                drflac_cuesheet_track_index* pTrackIndex = (drflac_cuesheet_track_index*)pRunningTrackData;
+                                /*
+                                asrfront patch: track headers are 36 bytes, so index entries in this packed buffer are
+                                only 4-byte aligned. Byte-swap through a local copy instead of dereferencing a
+                                misaligned drflac_cuesheet_track_index* (UB, flagged by UBSan).
+                                */
+                                drflac_cuesheet_track_index trackIndex;
 
-                                DRFLAC_COPY_MEMORY(pRunningTrackData, pRunningData, DRFLAC_CUESHEET_TRACK_INDEX_SIZE_IN_BYTES);
+                                DRFLAC_COPY_MEMORY(&trackIndex, pRunningData, DRFLAC_CUESHEET_TRACK_INDEX_SIZE_IN_BYTES);
+                                trackIndex.offset = drflac__be2host_64(trackIndex.offset);
+                                DRFLAC_COPY_MEMORY(pRunningTrackData, &trackIndex, DRFLAC_CUESHEET_TRACK_INDEX_SIZE_IN_BYTES);
+
                                 pRunningData      += DRFLAC_CUESHEET_TRACK_INDEX_SIZE_IN_BYTES;
                                 pRunningTrackData += sizeof(drflac_cuesheet_track_index);
-
-                                pTrackIndex->offset = drflac__be2host_64(pTrackIndex->offset);
                             }
                         }
 

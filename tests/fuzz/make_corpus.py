@@ -185,6 +185,17 @@ def main() -> None:
     flac[21] = (flac[21] & 0xF0) | (total >> 32)  # that once sized the first buffer (5.4 GB)
     flac[22:26] = (total & 0xFFFFFFFF).to_bytes(4, "big")
     seeds["regress_flac_huge_total.flac"] = bytes(flac)
+    # CUESHEET with an index point: dr_flac byte-swapped it through a 4-byte aligned
+    # drflac_cuesheet_track_index* (36-byte track headers; UBSan misaligned access)
+    flac = bytearray((OUT / "s16.flac").read_bytes())
+    cue = bytes(128) + struct.pack(">Q", 0) + bytes(259) + bytes([2])  # 2 tracks
+    cue += struct.pack(">QB", 0, 1) + bytes(26) + bytes([1])  # track 1, 1 index point
+    cue += struct.pack(">QB4x", 588, 1)  # index point: offset 588, number 1
+    cue += struct.pack(">QB", 0, 170) + bytes(27)  # lead-out, no index points
+    last = flac[4] & 0x80  # STREAMINFO is block 0: the CUESHEET takes its last-block flag
+    flac[4] &= 0x7F
+    flac[42:42] = bytes([last | 5]) + len(cue).to_bytes(3, "big") + cue
+    seeds["regress_flac_cuesheet_index.flac"] = bytes(flac)
     # CAF data chunk size INT64_MIN: size - 4 once overflowed int64 (UBSan)
     seeds["regress_caf_data_size_int64_min.caf"] = caf(pcm, data_size=-(1 << 63))
     for name, data in seeds.items():
