@@ -623,40 +623,89 @@ static void test_file(void) {
 static void test_resampler_cache(void) {
     /* Reused while cached; private when every slot is in use or the bank is too large. */
     af_resampler *a = NULL, *b = NULL;
-    CHECK(af_resampler_acquire(44100, 16000, &a) == AF_OK && a);
-    CHECK(af_resampler_acquire(44100, 16000, &b) == AF_OK && b == a);
+    CHECK(af_resampler_acquire(44100, 16000, AF_BANK_F32, &a) == AF_OK && a);
+    CHECK(af_resampler_acquire(44100, 16000, AF_BANK_F32, &b) == AF_OK && b == a);
     af_resampler_release(b);
     af_resampler_release(a);
-    CHECK(af_resampler_acquire(44100, 16000, &b) == AF_OK && b == a); /* idle, still cached */
+    CHECK(af_resampler_acquire(44100, 16000, AF_BANK_F32, &b) == AF_OK &&
+          b == a); /* idle, still cached */
     af_resampler_release(b);
 
     const int busy_rates[4] = {11025, 22050, 32000, 48000};
     af_resampler *busy[4];
     for (int i = 0; i < 4; i++)
-        CHECK(af_resampler_acquire(busy_rates[i], 16000, &busy[i]) == AF_OK);
-    CHECK(af_resampler_acquire(44100, 16000, &a) == AF_OK); /* evicted: all slots busy */
-    CHECK(af_resampler_acquire(44100, 16000, &b) == AF_OK && b != a);
+        CHECK(af_resampler_acquire(busy_rates[i], 16000, AF_BANK_F32, &busy[i]) == AF_OK);
+    CHECK(af_resampler_acquire(44100, 16000, AF_BANK_F32, &a) ==
+          AF_OK); /* evicted: all slots busy */
+    CHECK(af_resampler_acquire(44100, 16000, AF_BANK_F32, &b) == AF_OK && b != a);
     CHECK(af_resampler_taps(a) == 92 && af_resampler_taps(b) == 92);
     af_resampler_release(a);
     af_resampler_release(b);
     af_resampler *again = NULL;
-    CHECK(af_resampler_acquire(48000, 16000, &again) == AF_OK && again == busy[3]);
+    CHECK(af_resampler_acquire(48000, 16000, AF_BANK_F32, &again) == AF_OK && again == busy[3]);
     af_resampler_release(again);
     for (int i = 0; i < 4; i++)
         af_resampler_release(busy[i]);
-    CHECK(af_resampler_acquire(44100, 16000, &a) == AF_OK); /* evicts an idle entry */
-    CHECK(af_resampler_acquire(44100, 16000, &b) == AF_OK && b == a);
+    CHECK(af_resampler_acquire(44100, 16000, AF_BANK_F32, &a) == AF_OK); /* evicts an idle entry */
+    CHECK(af_resampler_acquire(44100, 16000, AF_BANK_F32, &b) == AF_OK && b == a);
     af_resampler_release(a);
     af_resampler_release(b);
 
-    /* interpolated mode at 383999 Hz: ~13 MB of filters, never cached */
-    CHECK(af_resampler_acquire(383999, 16000, &a) == AF_OK && !af_resampler_exact(a));
-    CHECK(af_resampler_acquire(383999, 16000, &b) == AF_OK && b != a);
+    /* interpolated mode at 44101 Hz: only the float bank (0.4 MB) counts, so it is cached */
+    CHECK(af_resampler_acquire(44101, 16000, AF_BANK_F32, &a) == AF_OK && !af_resampler_exact(a));
+    CHECK(af_resampler_acquire(44101, 16000, AF_BANK_F32, &b) == AF_OK && b == a);
+    af_resampler_release(b);
+    /* another path's bank: a separate resampler, then cached as well */
+    CHECK(af_resampler_acquire(44101, 16000, AF_BANK_S16, &b) == AF_OK && b != a);
+    af_resampler_release(b);
+    af_resampler *c = NULL;
+    CHECK(af_resampler_acquire(44101, 16000, AF_BANK_S16, &c) == AF_OK && c == b);
+    af_resampler_release(c);
+    af_resampler_release(a);
+
+    /* interpolated mode at 383999 Hz: ~3.2 MB of float filters, never cached */
+    CHECK(af_resampler_acquire(383999, 16000, AF_BANK_F32, &a) == AF_OK && !af_resampler_exact(a));
+    CHECK(af_resampler_acquire(383999, 16000, AF_BANK_F32, &b) == AF_OK && b != a);
     af_resampler_release(a);
     af_resampler_release(b);
 
-    CHECK(af_resampler_acquire(999, 16000, &a) == AF_EUNSUPPORTED && a == NULL);
-    CHECK(af_resampler_acquire(44100, 16000, NULL) == AF_EINVAL);
+    CHECK(af_resampler_acquire(999, 16000, AF_BANK_F32, &a) == AF_EUNSUPPORTED && a == NULL);
+    CHECK(af_resampler_acquire(44100, 16000, AF_BANK_F32, NULL) == AF_EINVAL);
+    CHECK(af_resampler_acquire(44100, 16000, 0, &a) == AF_EINVAL && a == NULL);
+    CHECK(af_resampler_acquire(44100, 16000, 8, &a) == AF_EINVAL && a == NULL);
+}
+
+static void test_resampler_limits(void) {
+    /* Filters longer than the edge buffers (low output rates from high input rates) are
+     * refused instead of overflowing them; every input rate works for 16 kHz output. */
+    af_resampler *r = NULL;
+    CHECK(af_resampler_create(384000, 1000, &r) == AF_EUNSUPPORTED && r == NULL);
+    CHECK(af_resampler_create(384000, 15000, &r) == AF_EUNSUPPORTED && r == NULL);
+    CHECK(af_resampler_create(384000, 16000, &r) == AF_OK && af_resampler_taps(r) == 792);
+    float x[2000] = {0}, y[100];
+    af_resample_f32(r, x, 2000, y); /* edge outputs use the whole buffer */
+    af_resampler_destroy(r);
+    CHECK(af_resampler_create(383999, 16000, &r) == AF_OK && !af_resampler_exact(r));
+    af_resample_f32(r, x, 2000, y);
+    double xd[2000] = {0}, yd[100];
+    af_resample_f64(r, xd, 2000, yd);
+    int32_t xq[2000] = {0}, yq[100];
+    af_resample_s16(r, xq, 2000, yq);
+    af_resampler_destroy(r);
+
+    /* a resampler with one bank computes the same as one with all of them */
+    af_resampler *all = NULL, *f32 = NULL;
+    CHECK(af_resampler_create(44101, 16000, &all) == AF_OK);
+    CHECK(af_resampler_create_banks(44101, 16000, AF_BANK_F32, &f32) == AF_OK);
+    float s[4000], ya[1500], yb[1500];
+    for (int i = 0; i < 4000; i++)
+        s[i] = (float)((i * 7919 % 2001) - 1000) / 1000.0f;
+    CHECK(af_resampler_out_len(all, 4000) <= 1500);
+    af_resample_f32(all, s, 4000, ya);
+    af_resample_f32(f32, s, 4000, yb);
+    CHECK(memcmp(ya, yb, af_resampler_out_len(all, 4000) * sizeof(float)) == 0);
+    af_resampler_destroy(all);
+    af_resampler_destroy(f32);
 }
 
 int main(void) {
@@ -675,6 +724,7 @@ int main(void) {
     test_coreaudio_layouts();
     test_file();
     test_resampler_cache();
+    test_resampler_limits();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

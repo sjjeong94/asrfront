@@ -341,7 +341,10 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
         *n_out = n;
         return AF_OK;
     }
-    if (resample && (rc = af_resampler_acquire(d->sample_rate, sr_out, &rs)) != AF_OK)
+    const int banks = path == PATH_FLOAT    ? AF_BANK_F32
+                      : path == PATH_DOUBLE ? AF_BANK_F64
+                                            : AF_BANK_S16;
+    if (resample && (rc = af_resampler_acquire(d->sample_rate, sr_out, banks, &rs)) != AF_OK)
         return rc;
     size_t m = resample ? af_resampler_out_len(rs, n) : n;
     const size_t es = elem_size[path];

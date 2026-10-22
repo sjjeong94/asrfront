@@ -20,6 +20,10 @@
 #define KAISER_BETA 9.0
 #define MAX_EXACT_PHASES 1024
 #define LANES 8
+/* Longest filter row (width, in samples) the edge buffers hold. N <= ceil(32 * sr_in /
+ * (0.97 * sr_out)): 792 at 384 kHz -> 16 kHz; filters for lower output rates from the highest
+ * input rates are longer and refused by af_resampler_create. */
+#define MAX_WIDTH (AF_RESAMPLE_MAX_RATE / 485 + 16)
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -32,6 +36,7 @@ struct af_resampler {
     int width;     /* N rounded up to a multiple of LANES (float bank row stride) */
     int phases;
     int exact;
+    int banks;              /* AF_BANK_* held; the others are NULL */
     double *bank;           /* (phases + 1) x n_taps */
     float *bankf;           /* (phases + 1) x width, zero padded */
     int32_t *bankq;         /* (phases + 1) x n_taps, Q15 */
@@ -86,12 +91,27 @@ static void kaiser_sinc(double frac, int n_taps, double fc, double *h) {
 }
 
 int af_resampler_create(int sr_in, int sr_out, af_resampler **out) {
+    return af_resampler_create_banks(sr_in, sr_out, AF_BANK_ALL, out);
+}
+
+int af_resampler_create_banks(int sr_in, int sr_out, int banks, af_resampler **out) {
     if (!out)
         return AF_EINVAL;
     *out = NULL;
+    if (banks <= 0 || (banks & ~AF_BANK_ALL))
+        return AF_EINVAL;
     if (sr_in < AF_RESAMPLE_MIN_RATE || sr_in > AF_RESAMPLE_MAX_RATE ||
         sr_out < AF_RESAMPLE_MIN_RATE || sr_out > AF_RESAMPLE_MAX_RATE)
         return AF_EUNSUPPORTED;
+    double fc = CUTOFF * sr_out / sr_in;
+    if (fc > 1.0)
+        fc = 1.0;
+    int n_taps = (int)ceil(FILTER_SIZE / fc);
+    n_taps += n_taps % 2;
+    const int width = (n_taps + LANES - 1) / LANES * LANES;
+    if (width > MAX_WIDTH)
+        return AF_EUNSUPPORTED;
+
     af_resampler *r = calloc(1, sizeof(*r));
     if (!r)
         return AF_ENOMEM;
@@ -100,22 +120,20 @@ int af_resampler_create(int sr_in, int sr_out, af_resampler **out) {
     uint64_t g = gcd_u64((uint64_t)sr_in, (uint64_t)sr_out);
     r->p = (uint64_t)sr_in / g;
     r->q = (uint64_t)sr_out / g;
-
-    double fc = CUTOFF * sr_out / sr_in;
-    if (fc > 1.0)
-        fc = 1.0;
-    int n_taps = (int)ceil(FILTER_SIZE / fc);
-    n_taps += n_taps % 2;
     r->n_taps = n_taps;
-    r->width = (n_taps + LANES - 1) / LANES * LANES;
+    r->width = width;
     r->exact = r->q <= MAX_EXACT_PHASES;
     r->phases = r->exact ? (int)r->q : MAX_EXACT_PHASES;
+    r->banks = banks;
 
+    /* The float64 bank is the source of the others; kept only if asked for. */
     size_t rows = (size_t)r->phases + 1;
     r->bank = malloc(rows * (size_t)n_taps * sizeof(double));
-    r->bankf = calloc(rows * (size_t)r->width, sizeof(float));
-    r->bankq = malloc(rows * (size_t)n_taps * sizeof(int32_t));
-    if (!r->bank || !r->bankf || !r->bankq) {
+    if (banks & AF_BANK_F32)
+        r->bankf = calloc(rows * (size_t)r->width, sizeof(float));
+    if (banks & AF_BANK_S16)
+        r->bankq = malloc(rows * (size_t)n_taps * sizeof(int32_t));
+    if (!r->bank || (banks & AF_BANK_F32 && !r->bankf) || (banks & AF_BANK_S16 && !r->bankq)) {
         af_resampler_destroy(r);
         return AF_ENOMEM;
     }
@@ -135,12 +153,19 @@ int af_resampler_create(int sr_in, int sr_out, af_resampler **out) {
     for (size_t m = 0; m < rows; m++) {
         for (int i = 0; i < n_taps; i++) {
             double h = r->bank[m * n_taps + i];
-            r->bankf[m * r->width + i] = (float)h;
-            double v = nearbyint(h * 32768.0); /* stored as int16: 1.0 -> 32767 */
-            r->bankq[m * n_taps + i] = (int32_t)(v > 32767.0    ? 32767.0
-                                                 : v < -32768.0 ? -32768.0
-                                                                : v);
+            if (r->bankf)
+                r->bankf[m * r->width + i] = (float)h;
+            if (r->bankq) {
+                double v = nearbyint(h * 32768.0); /* stored as int16: 1.0 -> 32767 */
+                r->bankq[m * n_taps + i] = (int32_t)(v > 32767.0    ? 32767.0
+                                                     : v < -32768.0 ? -32768.0
+                                                                    : v);
+            }
         }
+    }
+    if (!(banks & AF_BANK_F64)) {
+        free(r->bank);
+        r->bank = NULL;
     }
     r->kern = af_kernels_select(); /* once: the selection runs cpuid (slow in VMs) */
     *out = r;
@@ -162,8 +187,10 @@ void af_resampler_destroy(af_resampler *r) {
 
 /* Creating the bank costs ~0.5 ms at 44.1 kHz (160 phases), more than resampling a 2 s
  * clip, so loads keep a few resamplers. Bounded: CACHE_SLOTS entries of at most
- * CACHE_MAX_BYTES of filter bank each; larger banks (interpolated mode at high rates,
- * up to ~13 MB) are created per call. */
+ * CACHE_MAX_BYTES of filter bank each, counting only the banks a resampler holds (a load
+ * needs one: the float bank of interpolated mode is 0.4 MB at 44101 Hz, 0.8 MB at 96001 Hz);
+ * larger banks (interpolated mode above ~124 kHz, up to ~3.2 MB) are created per call. An
+ * entry serves the paths whose banks it holds; another path at the same rates gets its own. */
 #define CACHE_SLOTS 4
 #define CACHE_MAX_BYTES ((size_t)1 << 20)
 
@@ -199,15 +226,22 @@ static void cache_init(void) {
 #endif
 
 static size_t bank_bytes(const af_resampler *r) {
-    return ((size_t)r->phases + 1) * ((size_t)r->n_taps * (sizeof(double) + sizeof(int32_t)) +
-                                      (size_t)r->width * sizeof(float));
+    size_t row = 0; /* bytes per filter row of the banks it holds */
+    if (r->bank)
+        row += (size_t)r->n_taps * sizeof(double);
+    if (r->bankq)
+        row += (size_t)r->n_taps * sizeof(int32_t);
+    if (r->bankf)
+        row += (size_t)r->width * sizeof(float);
+    return ((size_t)r->phases + 1) * row;
 }
 
-/* Under cache_lock: the cached resampler for these rates, marked as used once more. */
-static af_resampler *cache_take(int sr_in, int sr_out) {
+/* Under cache_lock: a cached resampler for these rates with (at least) these banks, marked as
+ * used once more. */
+static af_resampler *cache_take(int sr_in, int sr_out, int banks) {
     for (int i = 0; i < CACHE_SLOTS; i++) {
         af_resampler *r = cache[i];
-        if (r && r->sr_in == sr_in && r->sr_out == sr_out) {
+        if (r && r->sr_in == sr_in && r->sr_out == sr_out && (r->banks & banks) == banks) {
             r->refs++;
             r->used = ++cache_clock;
             return r;
@@ -216,26 +250,29 @@ static af_resampler *cache_take(int sr_in, int sr_out) {
     return NULL;
 }
 
-int af_resampler_acquire(int sr_in, int sr_out, af_resampler **out) {
+int af_resampler_acquire(int sr_in, int sr_out, int banks, af_resampler **out) {
     if (!out)
         return AF_EINVAL;
     *out = NULL;
+    if (banks <= 0 || (banks & ~AF_BANK_ALL)) /* before the cache: 0 would match any entry */
+        return AF_EINVAL;
     cache_init();
     lock();
-    af_resampler *r = cache_take(sr_in, sr_out);
+    af_resampler *r = cache_take(sr_in, sr_out, banks);
     unlock();
     if (r) {
         *out = r;
         return AF_OK;
     }
-    int rc = af_resampler_create(sr_in, sr_out, &r); /* outside the lock: slow */
+    int rc = af_resampler_create_banks(sr_in, sr_out, banks, &r); /* outside the lock: slow */
     if (rc != AF_OK)
         return rc;
     r->refs = 1;
     af_resampler *evicted = NULL;
     if (bank_bytes(r) <= CACHE_MAX_BYTES) {
         lock();
-        af_resampler *other = cache_take(sr_in, sr_out); /* created meanwhile by another thread */
+        /* created meanwhile by another thread */
+        af_resampler *other = cache_take(sr_in, sr_out, banks);
         if (other) {
             unlock();
             af_resampler_destroy(r);
@@ -395,8 +432,7 @@ void af_resample_f32_range(const af_resampler *r, const float *x, size_t x0, siz
                            size_t k1, float *y) {
     const int nt = r->n_taps, wd = r->width;
     const af_kernels *kern = r->kern;
-    /* N <= ceil(32 * sr / (0.97 * 16000)), rounded up to a multiple of 8 */
-    float edge_[AF_RESAMPLE_MAX_RATE / 485 + 16] = {0};
+    float edge_[MAX_WIDTH] = {0};
     /* The kernel reads `width` samples from first = b - N/2 + 1 (the taps past N are zero).
      * first grows with k, so the interior outputs (0 <= first, first + width <= n) are one
      * range [k_lo, k_hi): b_k = floor(k p / q) >= N/2 - 1 and b_k <= n + N/2 - 1 - width. */
@@ -456,7 +492,7 @@ void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) 
 void af_resample_f64(const af_resampler *r, const double *x, size_t n, double *y) {
     size_t n_out = af_resampler_out_len(r, n);
     const int nt = r->n_taps;
-    double edge_[AF_RESAMPLE_MAX_RATE / 485 + 2];
+    double edge_[MAX_WIDTH];
     pos_t s;
     pos_init(r, &s);
     for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {
@@ -491,7 +527,7 @@ static int64_t floor_div(int64_t a, int64_t b) { /* b > 0 */
 void af_resample_s16(const af_resampler *r, const int32_t *x, size_t n, int32_t *y) {
     size_t n_out = af_resampler_out_len(r, n);
     const int nt = r->n_taps;
-    int32_t edge_[AF_RESAMPLE_MAX_RATE / 485 + 2];
+    int32_t edge_[MAX_WIDTH];
     pos_t s;
     pos_init(r, &s);
     for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {

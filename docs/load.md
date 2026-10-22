@@ -395,9 +395,10 @@ exactly (n output samples pass `max_duration=n / 16000`, n + 1 do not):
 The file itself is still read whole, so bound the upload size as well.
 
 Besides that, the process keeps up to 4 resamplers for the rates it loaded most recently
-(each with at most 1 MiB of filters; larger banks, i.e. interpolated mode at high rates, are
-built per call), since building a bank takes ~0.5 ms at 44.1 kHz, more than resampling a
-2 s clip.
+(each with at most 1 MiB of filters, holding only the bank of the arithmetic path that used
+it; larger banks, i.e. interpolated mode above ~124 kHz, are built per call), since building a
+bank takes ~0.5 ms at 44.1 kHz, more than resampling a 2 s clip, and 4–9 ms in interpolated
+mode (e.g. 44101 or 96001 Hz).
 
 ## SenseVoice (FunASR) loading
 

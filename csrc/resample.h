@@ -11,20 +11,29 @@
 
 typedef struct af_resampler af_resampler;
 
-/* AF_EUNSUPPORTED for rates outside [AF_RESAMPLE_MIN_RATE, AF_RESAMPLE_MAX_RATE]. */
+/* Filter banks a resampler holds, one per arithmetic path: af_resample_f32 / _f32_range need
+ * AF_BANK_F32, af_resample_f64 and af_resampler_bank AF_BANK_F64, af_resample_s16
+ * AF_BANK_S16. */
+enum { AF_BANK_F32 = 1, AF_BANK_F64 = 2, AF_BANK_S16 = 4, AF_BANK_ALL = 7 };
+
+/* With every bank. AF_EUNSUPPORTED for rates outside [AF_RESAMPLE_MIN_RATE,
+ * AF_RESAMPLE_MAX_RATE], and for filters longer than the resampler supports (output rates
+ * below 16 kHz from the highest input rates). */
 int af_resampler_create(int sr_in, int sr_out, af_resampler **out);
+/* The same with only the banks in `banks` (a nonzero mask of AF_BANK_*). */
+int af_resampler_create_banks(int sr_in, int sr_out, int banks, af_resampler **out);
 void af_resampler_destroy(af_resampler *r);
 
-/* The same, shared through a small process-wide cache (a resampler is read-only once
- * created, so one serves any number of threads): repeated loads at a rate skip building
- * the filter bank. Thread-safe. Release with af_resampler_release(), never destroy. */
-int af_resampler_acquire(int sr_in, int sr_out, af_resampler **out);
+/* af_resampler_create_banks, shared through a small process-wide cache (a resampler is
+ * read-only once created, so one serves any number of threads): repeated loads at a rate skip
+ * building the filter bank. Thread-safe. Release with af_resampler_release(), never destroy. */
+int af_resampler_acquire(int sr_in, int sr_out, int banks, af_resampler **out);
 void af_resampler_release(af_resampler *r);
 
 int af_resampler_taps(const af_resampler *r);   /* N */
 int af_resampler_phases(const af_resampler *r); /* filters in the bank, excluding the extra one */
 int af_resampler_exact(const af_resampler *r);  /* 1: exact rational phases */
-/* Filter bank row m (0 <= m <= phases), N float64 taps (testing). */
+/* Filter bank row m (0 <= m <= phases), N float64 taps (testing; needs AF_BANK_F64). */
 const double *af_resampler_bank(const af_resampler *r, int m);
 
 /* Number of output samples for n input samples. */

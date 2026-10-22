@@ -89,3 +89,11 @@ def test_unsupported_rates():
             _ext._resample(np.zeros(10, np.float32), sr)
     with pytest.raises(TypeError):
         _ext._resample(np.zeros(10, np.int16), 44100)
+
+
+def test_filter_too_long_for_low_output_rates():
+    """Low output rates from high input rates need longer filters than the resampler holds:
+    refused (they overflowed a stack buffer before)."""
+    for sr_out in [1000, 15000]:
+        with pytest.raises(ValueError):
+            _ext._resample(np.zeros(1000, np.float32), 384000, sr_out)
