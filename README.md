@@ -216,3 +216,8 @@ MIT. Test data in `tests/data` comes from [openai/whisper](https://github.com/op
 (MIT); see [`tests/data/README.md`](https://github.com/sjjeong94/asrfront/blob/main/tests/data/README.md). FLAC and MP3 decoding use the vendored
 [dr_flac / dr_mp3](https://github.com/mackron/dr_libs) (public domain or MIT-0); see
 [`csrc/third_party/README.md`](https://github.com/sjjeong94/asrfront/blob/main/csrc/third_party/README.md).
+The binary extension statically links [nanobind](https://github.com/wjakob/nanobind)
+(BSD-3-Clause, with tsl::robin_map, MIT). The license texts of these and of the projects the
+test reference code is ported from are in
+[`LICENSES/`](https://github.com/sjjeong94/asrfront/blob/main/LICENSES/README.md) and are
+included in the wheels.

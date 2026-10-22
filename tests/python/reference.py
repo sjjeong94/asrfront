@@ -12,6 +12,8 @@
 Every stage is exposed separately so intermediate values (window, filters, power spectrum,
 ...) can be compared when debugging the C implementation. Everything is computed in float64;
 the original libraries compute in float32, and ``test_reference.py`` checks the two agree.
+
+The upstream copyright notices and license texts are in ``LICENSES/`` at the repository root.
 """
 
 from __future__ import annotations
