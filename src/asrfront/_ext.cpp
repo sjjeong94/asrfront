@@ -64,8 +64,10 @@ template <typename F> static Out2D compute_2d(size_t rows, size_t cols, F &&fn) 
         throw nb::value_error(("output of shape (" + std::to_string(rows) + ", " +
                                std::to_string(cols) + ") is too large")
                                   .c_str());
-    float *buf = new float[rows * cols > 0 ? rows * cols : 1];
+    std::unique_ptr<float[]> mem(new float[rows * cols > 0 ? rows * cols : 1]);
+    float *buf = mem.get();
     nb::capsule owner(buf, [](void *p) noexcept { delete[] static_cast<float *>(p); });
+    mem.release(); // the capsule owns it now (its constructor may throw before)
     int rc;
     {
         nb::gil_scoped_release release;
@@ -172,12 +174,11 @@ struct Whisper {
     int n_mels;
     std::atomic<bool> busy{false};
 
-    Whisper(int n_mels_, bool pad_or_trim, int n_threads) : n_mels(n_mels_) {
+    Whisper(int n_mels_, bool pad_or_trim) : n_mels(n_mels_) {
         af_whisper_config cfg;
         af_whisper_default_config(&cfg);
         cfg.n_mels = n_mels_;
         cfg.pad_or_trim = pad_or_trim;
-        cfg.n_threads = n_threads;
         check(af_whisper_create(&cfg, &h));
     }
     ~Whisper() { af_whisper_destroy(h); }
@@ -245,7 +246,7 @@ struct SenseVoice {
     std::atomic<bool> busy{false};
 
     SenseVoice(int n_mels, int lfr_m, int lfr_n, float dither, unsigned long long seed,
-               std::optional<Vec> cmvn_shift, std::optional<Vec> cmvn_scale, int n_threads)
+               std::optional<Vec> cmvn_shift, std::optional<Vec> cmvn_scale)
         : n_mels(n_mels) {
         af_sensevoice_config cfg;
         af_sensevoice_default_config(&cfg);
@@ -254,7 +255,6 @@ struct SenseVoice {
         cfg.lfr_n = lfr_n;
         cfg.dither = dither;
         cfg.seed = seed;
-        cfg.n_threads = n_threads;
         if (cmvn_shift.has_value() != cmvn_scale.has_value())
             throw nb::value_error("cmvn_shift and cmvn_scale must be given together");
         if (cmvn_shift) {
@@ -294,6 +294,59 @@ struct SenseVoice {
         return compute_into(af_sensevoice_raw_frames(h, n), (size_t)n_mels, out, [&](float *o) {
             return af_sensevoice_fbank_raw(h, audio.data(), n, o);
         });
+    }
+};
+
+struct SenseVoiceStream {
+    af_sensevoice_stream *s = nullptr;
+    std::atomic<bool> busy{false};
+
+    SenseVoiceStream(int n_mels, int lfr_m, int lfr_n, float dither, unsigned long long seed,
+                     std::optional<Vec> cmvn_shift, std::optional<Vec> cmvn_scale) {
+        af_sensevoice_config cfg;
+        af_sensevoice_default_config(&cfg);
+        cfg.n_mels = n_mels;
+        cfg.lfr_m = lfr_m;
+        cfg.lfr_n = lfr_n;
+        cfg.dither = dither;
+        cfg.seed = seed;
+        if (cmvn_shift.has_value() != cmvn_scale.has_value())
+            throw nb::value_error("cmvn_shift and cmvn_scale must be given together");
+        if (cmvn_shift) {
+            size_t dim = (size_t)n_mels * (size_t)lfr_m;
+            if (cmvn_shift->shape(0) != dim || cmvn_scale->shape(0) != dim)
+                throw nb::value_error("cmvn vectors must have length n_mels * lfr_m");
+            cfg.cmvn_shift = cmvn_shift->data();
+            cfg.cmvn_scale = cmvn_scale->data();
+        }
+        check(af_sensevoice_stream_create(&cfg, &s));
+    }
+    ~SenseVoiceStream() { af_sensevoice_stream_destroy(s); }
+    SenseVoiceStream(const SenseVoiceStream &) = delete;
+    SenseVoiceStream &operator=(const SenseVoiceStream &) = delete;
+
+    size_t feat_dim() const { return af_sensevoice_feat_dim(af_sensevoice_stream_frontend(s)); }
+
+    Out2D push(Audio audio) {
+        Busy guard(busy);
+        const size_t n = audio.shape(0);
+        return compute_2d(af_sensevoice_stream_push_rows(s, n), feat_dim(), [&](float *o) {
+            size_t rows;
+            return af_sensevoice_stream_push(s, audio.data(), n, o, &rows);
+        });
+    }
+
+    Out2D finish() {
+        Busy guard(busy);
+        return compute_2d(af_sensevoice_stream_finish_rows(s), feat_dim(), [&](float *o) {
+            size_t rows;
+            return af_sensevoice_stream_finish(s, o, &rows);
+        });
+    }
+
+    void reset() {
+        Busy guard(busy);
+        af_sensevoice_stream_reset(s);
     }
 };
 
@@ -402,6 +455,27 @@ NB_MODULE(_ext, m) {
         "longer than max_samples / 16000 s.");
 
     m.def(
+        "probe_memory",
+        [](Bytes data, int raw, size_t max_samples) {
+            af_audio_info info;
+            char err[128];
+            int rc;
+            {
+                nb::gil_scoped_release release;
+                rc = af_probe_memory(data.data(), data.shape(0), (af_raw_mode)raw, max_samples,
+                                     &info, err, sizeof err);
+            }
+            if (rc != AF_OK && err[0])
+                throw nb::value_error((std::string(af_strerror(rc)) + " (" + err + ")").c_str());
+            check(rc);
+            return nb::make_tuple(info.container, info.sample_rate, info.channels, info.n_frames,
+                                  info.n_samples);
+        },
+        "data"_a, "raw"_a, "max_samples"_a = 0,
+        "What load_memory would decode, without decoding: (container, sample_rate, channels, "
+        "n_frames, n_samples). Raises as load_memory.");
+
+    m.def(
         "_resample",
         [](nb::ndarray<nb::ro, nb::c_contig, nb::device::cpu, nb::ndim<1>> x, int sr_in,
            int sr_out) {
@@ -411,20 +485,26 @@ NB_MODULE(_ext, m) {
             size_t n = x.shape(0), m = af_resampler_out_len(r, n);
             nb::dlpack::dtype dt = x.dtype();
             if (dt == nb::dtype<float>()) {
-                float *y = new float[m > 0 ? m : 1];
+                std::unique_ptr<float[]> mem(new float[m > 0 ? m : 1]);
+                float *y = mem.get();
                 nb::capsule owner(y, [](void *p) noexcept { delete[] static_cast<float *>(p); });
+                mem.release();
                 af_resample_f32(r, static_cast<const float *>(x.data()), n, y);
                 return nb::cast(nb::ndarray<nb::numpy, float, nb::ndim<1>>(y, {m}, owner));
             }
             if (dt == nb::dtype<double>()) {
-                double *y = new double[m > 0 ? m : 1];
+                std::unique_ptr<double[]> mem(new double[m > 0 ? m : 1]);
+                double *y = mem.get();
                 nb::capsule owner(y, [](void *p) noexcept { delete[] static_cast<double *>(p); });
+                mem.release();
                 af_resample_f64(r, static_cast<const double *>(x.data()), n, y);
                 return nb::cast(nb::ndarray<nb::numpy, double, nb::ndim<1>>(y, {m}, owner));
             }
             if (dt == nb::dtype<int32_t>()) {
-                int32_t *y = new int32_t[m > 0 ? m : 1];
+                std::unique_ptr<int32_t[]> mem(new int32_t[m > 0 ? m : 1]);
+                int32_t *y = mem.get();
                 nb::capsule owner(y, [](void *p) noexcept { delete[] static_cast<int32_t *>(p); });
+                mem.release();
                 af_resample_s16(r, static_cast<const int32_t *>(x.data()), n, y);
                 return nb::cast(nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(y, {m}, owner));
             }
@@ -439,8 +519,10 @@ NB_MODULE(_ext, m) {
             check(af_resampler_create(sr_in, sr_out, &r));
             std::unique_ptr<af_resampler, void (*)(af_resampler *)> guard(r, af_resampler_destroy);
             size_t rows = (size_t)af_resampler_phases(r) + 1, cols = (size_t)af_resampler_taps(r);
-            double *b = new double[rows * cols];
+            std::unique_ptr<double[]> mem(new double[rows * cols]);
+            double *b = mem.get();
             nb::capsule owner(b, [](void *p) noexcept { delete[] static_cast<double *>(p); });
+            mem.release();
             for (size_t i = 0; i < rows; i++)
                 std::memcpy(b + i * cols, af_resampler_bank(r, (int)i), cols * sizeof(double));
             return nb::ndarray<nb::numpy, double, nb::ndim<2>>(b, {rows, cols}, owner);
@@ -448,7 +530,7 @@ NB_MODULE(_ext, m) {
         "sr_in"_a, "sr_out"_a = AF_SAMPLE_RATE, "(phases + 1, N) float64 filter bank (testing).");
 
     nb::class_<Whisper>(m, "WhisperFrontend")
-        .def(nb::init<int, bool, int>(), "n_mels"_a = 80, "pad_or_trim"_a = true, "n_threads"_a = 1)
+        .def(nb::init<int, bool>(), "n_mels"_a = 80, "pad_or_trim"_a = true)
         .def_ro("n_mels", &Whisper::n_mels)
         .def(
             "out_frames", [](const Whisper &w, size_t n) { return af_whisper_out_frames(w.h, n); },
@@ -485,11 +567,23 @@ NB_MODULE(_ext, m) {
              "log_mel(audios[i], n_frames, out=outs[i]) for every i with one GIL release; "
              "returns as WhisperFrontend.log_mel_many.");
 
+    nb::class_<SenseVoiceStream>(m, "SenseVoiceStream")
+        .def(nb::init<int, int, int, float, unsigned long long, std::optional<Vec>,
+                      std::optional<Vec>>(),
+             "n_mels"_a = 80, "lfr_m"_a = 7, "lfr_n"_a = 6, "dither"_a = 0.0f, "seed"_a = 0,
+             "cmvn_shift"_a = nb::none(), "cmvn_scale"_a = nb::none())
+        .def_prop_ro("feat_dim", &SenseVoiceStream::feat_dim)
+        .def("push", &SenseVoiceStream::push, "audio"_a,
+             "Append audio; returns the LFR (+CMVN) rows it completes, (k, feat_dim).")
+        .def("finish", &SenseVoiceStream::finish,
+             "The remaining rows of the utterance, then a reset.")
+        .def("reset", &SenseVoiceStream::reset, "Drop the pushed audio.");
+
     nb::class_<SenseVoice>(m, "SenseVoiceFrontend")
         .def(nb::init<int, int, int, float, unsigned long long, std::optional<Vec>,
-                      std::optional<Vec>, int>(),
+                      std::optional<Vec>>(),
              "n_mels"_a = 80, "lfr_m"_a = 7, "lfr_n"_a = 6, "dither"_a = 0.0f, "seed"_a = 0,
-             "cmvn_shift"_a = nb::none(), "cmvn_scale"_a = nb::none(), "n_threads"_a = 1)
+             "cmvn_shift"_a = nb::none(), "cmvn_scale"_a = nb::none())
         .def_prop_ro("feat_dim", [](const SenseVoice &s) { return af_sensevoice_feat_dim(s.h); })
         .def(
             "raw_frames",

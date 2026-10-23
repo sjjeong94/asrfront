@@ -193,60 +193,124 @@ static void describe(int rc, container fmt, const uint8_t *buf, size_t size, int
     }
 }
 
-int af_load_memory_ex(const void *buf_, size_t size, af_raw_mode raw, size_t max_samples,
-                      float **out, size_t *n_samples, char *err, size_t err_size) {
-    if (err && err_size > 0)
-        err[0] = 0;
-    if (!out || !n_samples || (!buf_ && size > 0))
-        return AF_EINVAL;
-    *out = NULL;
-    *n_samples = 0;
-    if (raw != AF_RAW_AUTO && raw != AF_RAW_NEVER && raw != AF_RAW_FORCE)
-        return AF_EINVAL;
-    const uint8_t *buf = buf_ ? buf_ : (const uint8_t *)"";
-
-    af_decoded d;
-    memset(&d, 0, sizeof d);
+/* Detect the container and decode it into *d (d->probe: only its frame count). Returns AF_OK
+ * (AF_PROBED when probing) or an error; *fmt receives the container. On an unsupported
+ * container err is already filled in (*described). */
+static int decode(const uint8_t *buf, size_t size, af_raw_mode raw, size_t max_samples,
+                  af_decoded *d, container *fmt_out, int *described, char *err, size_t err_size) {
     int rc;
     size_t mp3_off = 0;
     container fmt = raw == AF_RAW_FORCE ? FMT_UNKNOWN : detect(buf, size, &mp3_off);
+    *fmt_out = fmt;
+    *described = 0;
     switch (fmt) {
     case FMT_WAV:
-        rc = af_wav_decode(buf, size, max_samples, &d);
+        rc = af_wav_decode(buf, size, max_samples, d);
         break;
     case FMT_W64:
-        rc = af_w64_decode(buf, size, max_samples, &d);
+        rc = af_w64_decode(buf, size, max_samples, d);
         break;
     case FMT_AIFF:
-        rc = af_aiff_decode(buf, size, max_samples, &d);
+        rc = af_aiff_decode(buf, size, max_samples, d);
         break;
     case FMT_CAF:
-        rc = af_caf_decode(buf, size, max_samples, &d);
+        rc = af_caf_decode(buf, size, max_samples, d);
         break;
     case FMT_SPHERE:
-        rc = af_sphere_decode(buf, size, max_samples, &d);
+        rc = af_sphere_decode(buf, size, max_samples, d);
         break;
     case FMT_FLAC:
-        rc = af_flac_decode(buf, size, max_samples, &d);
+        rc = af_flac_decode(buf, size, max_samples, d);
         break;
     case FMT_MP3:
-        rc = af_mp3_decode(buf + mp3_off, size - mp3_off, max_samples, &d);
+        rc = af_mp3_decode(buf + mp3_off, size - mp3_off, max_samples, d);
         break;
     default:
         /* bytes of a known but unsupported container would decode as raw PCM noise */
         if (raw == AF_RAW_NEVER || (raw == AF_RAW_AUTO && unsupported_container(buf, size, 1))) {
-            describe(AF_EUNSUPPORTED, fmt, buf, size, 1, &d, err, err_size);
+            describe(AF_EUNSUPPORTED, fmt, buf, size, 1, d, err, err_size);
+            *described = 1;
             return AF_EUNSUPPORTED;
         }
-        rc = af_pcm_decode_raw(buf, size, max_samples, &d);
+        rc = af_pcm_decode_raw(buf, size, max_samples, d);
         break;
     }
+    return rc;
+}
+
+/* The argument checks shared by af_load_memory_ex and af_probe_memory. */
+static int check_args(const void *buf, size_t size, af_raw_mode raw, char *err, size_t err_size) {
+    if (err && err_size > 0)
+        err[0] = 0;
+    if (!buf && size > 0)
+        return AF_EINVAL;
+    if (raw != AF_RAW_AUTO && raw != AF_RAW_NEVER && raw != AF_RAW_FORCE)
+        return AF_EINVAL;
+    return AF_OK;
+}
+
+int af_load_memory_ex(const void *buf_, size_t size, af_raw_mode raw, size_t max_samples,
+                      float **out, size_t *n_samples, char *err, size_t err_size) {
+    if (err && err_size > 0)
+        err[0] = 0;
+    if (!out || !n_samples)
+        return AF_EINVAL;
+    *out = NULL;
+    *n_samples = 0;
+    int rc = check_args(buf_, size, raw, err, err_size);
+    if (rc != AF_OK)
+        return rc;
+    const uint8_t *buf = buf_ ? buf_ : (const uint8_t *)"";
+
+    af_decoded d;
+    memset(&d, 0, sizeof d);
+    container fmt;
+    int described;
+    rc = decode(buf, size, raw, max_samples, &d, &fmt, &described, err, err_size);
+    if (described)
+        return rc;
     if (rc == AF_OK) {
         rc = af_audio_to_mono(&d, AF_SAMPLE_RATE, out, n_samples);
         af_decoded_free(&d);
     }
     if (rc == AF_EUNSUPPORTED || rc == AF_ECORRUPT)
         describe(rc, fmt, buf, size, 0, &d, err, err_size);
+    return rc;
+}
+
+int af_probe_memory(const void *buf_, size_t size, af_raw_mode raw, size_t max_samples,
+                    af_audio_info *info, char *err, size_t err_size) {
+    if (err && err_size > 0)
+        err[0] = 0;
+    if (!info)
+        return AF_EINVAL;
+    memset(info, 0, sizeof *info);
+    int rc = check_args(buf_, size, raw, err, err_size);
+    if (rc != AF_OK)
+        return rc;
+    const uint8_t *buf = buf_ ? buf_ : (const uint8_t *)"";
+
+    af_decoded d;
+    memset(&d, 0, sizeof d);
+    d.probe = 1;
+    container fmt;
+    int described;
+    rc = decode(buf, size, raw, max_samples, &d, &fmt, &described, err, err_size);
+    if (described)
+        return rc;
+    af_decoded_free(&d); /* nothing to free in probe mode, unless a decoder ignored it */
+    if (rc == AF_PROBED || rc == AF_OK)
+        rc = d.sample_rate == AF_SAMPLE_RATE ? AF_OK
+                                             : af_resample_check(d.sample_rate, AF_SAMPLE_RATE);
+    if (rc == AF_OK) {
+        info->container = container_names[fmt];
+        info->sample_rate = d.sample_rate;
+        info->channels = d.channels;
+        info->n_frames = d.n_frames;
+        info->n_samples = af_resample_len(d.sample_rate, AF_SAMPLE_RATE, d.n_frames);
+    } else if (rc == AF_EUNSUPPORTED || rc == AF_ECORRUPT) {
+        describe(rc, fmt, buf, size, 0, &d, err, err_size);
+    }
     return rc;
 }
 
@@ -284,6 +348,13 @@ static FILE *open_utf8(const char *path) {
 }
 
 int af_load_file(const char *path_utf8, float **out, size_t *n_samples) {
+    return af_load_file_ex(path_utf8, 0, out, n_samples, NULL, 0);
+}
+
+int af_load_file_ex(const char *path_utf8, size_t max_samples, float **out, size_t *n_samples,
+                    char *err, size_t err_size) {
+    if (err && err_size > 0)
+        err[0] = 0;
     if (!path_utf8 || !out || !n_samples)
         return AF_EINVAL;
     *out = NULL;
@@ -315,8 +386,9 @@ int af_load_file(const char *path_utf8, float **out, size_t *n_samples) {
     }
     fclose(f);
     if (rc == AF_OK)
-        rc = af_load_memory(buf, size, has_raw_extension(path_utf8) ? AF_RAW_FORCE : AF_RAW_NEVER,
-                            out, n_samples);
+        rc =
+            af_load_memory_ex(buf, size, has_raw_extension(path_utf8) ? AF_RAW_FORCE : AF_RAW_NEVER,
+                              max_samples, out, n_samples, err, err_size);
     free(buf);
     return rc;
 }

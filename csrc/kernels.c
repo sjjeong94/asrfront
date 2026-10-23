@@ -48,14 +48,44 @@ static int cpu_has_avx2(void) { /* AVX2 and FMA3: the avx2 table is built with -
 #endif
 #endif
 
+#ifdef AF_HAVE_AVX2
+/* cpuid traps to the hypervisor in many VMs (microseconds), and every handle and resampler
+ * selects its kernels: query the CPU once. */
+static int have_avx2;
+#ifdef _WIN32
+#include <windows.h>
+static INIT_ONCE avx2_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK detect_avx2(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once, (void)param, (void)ctx;
+    have_avx2 = cpu_has_avx2();
+    return TRUE;
+}
+static int avx2_available(void) {
+    InitOnceExecuteOnce(&avx2_once, detect_avx2, NULL, NULL);
+    return have_avx2;
+}
+#else
+#include <pthread.h>
+static pthread_once_t avx2_once = PTHREAD_ONCE_INIT;
+static void detect_avx2(void) {
+    have_avx2 = cpu_has_avx2();
+}
+static int avx2_available(void) {
+    pthread_once(&avx2_once, detect_avx2);
+    return have_avx2;
+}
+#endif
+#endif
+
 const af_kernels *af_kernels_select(void) {
+    /* read on every call: tests switch variants at run time */
     const char *force = getenv("ASRFRONT_KERNELS");
     if (force && strcmp(force, "generic") == 0)
         return &af_kernels_generic;
     if (force && strcmp(force, "scalar") == 0)
         return &af_kernels_scalar;
 #ifdef AF_HAVE_AVX2
-    if (cpu_has_avx2())
+    if (avx2_available())
         return &af_kernels_avx2;
 #endif
     return &af_kernels_generic;

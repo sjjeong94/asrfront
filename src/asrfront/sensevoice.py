@@ -19,7 +19,7 @@ SAMPLE_RATE = 16000
 Cmvn = tuple[np.ndarray, np.ndarray]
 CmvnLike = Union[Cmvn, str, "os.PathLike[str]"]
 
-__all__ = ["fbank", "fbank_batch", "fbank_raw", "load_cmvn", "SAMPLE_RATE"]
+__all__ = ["fbank", "fbank_batch", "fbank_raw", "FbankStream", "load_cmvn", "SAMPLE_RATE"]
 
 
 def load_cmvn(path: str | os.PathLike[str]) -> Cmvn:
@@ -224,3 +224,67 @@ def fbank_raw(audio: Any, n_mels: int = 80, dither: float = 0.0, seed: int = 0) 
     """
     n_mels, _, _, dither, seed = _check_params(n_mels, 1, 1, dither, seed)
     return _frontend(n_mels, 1, 1, None, dither, seed).fbank_raw(as_audio(audio))
+
+
+class FbankStream:
+    """Streaming :func:`fbank`: push audio in pieces, get each feature row once it is final.
+
+    The rows returned by all :meth:`push` calls and the :meth:`finish` of an utterance are
+    exactly ``fbank(concatenated audio, ...)`` with the same arguments (dither included), however
+    the audio is split. A row is returned as soon as no later sample changes it, about
+    ``(lfr_m - 1) / 2 * 10 ms`` plus one 25 ms frame after its audio. Memory does not grow with
+    the stream. Not thread-safe: use one object per stream.
+
+    Example::
+
+        stream = sensevoice.FbankStream(cmvn="am.mvn")
+        for chunk in microphone_chunks():  # 16 kHz mono, any sizes
+            rows = stream.push(chunk)  # (k, 560), k >= 0
+            ...
+        rows = stream.finish()  # the last rows; the stream starts over
+
+    Args:
+        cmvn, n_mels, lfr_m, lfr_n, dither, seed: as in :func:`fbank` (the dither RNG is
+            reseeded at the start of every utterance).
+    """
+
+    def __init__(
+        self,
+        cmvn: CmvnLike | None = None,
+        n_mels: int = 80,
+        lfr_m: int = 7,
+        lfr_n: int = 6,
+        dither: float = 0.0,
+        seed: int = 0,
+    ) -> None:
+        n_mels, lfr_m, lfr_n, dither, seed = _check_params(n_mels, lfr_m, lfr_n, dither, seed)
+        c = _resolve_cmvn(cmvn, n_mels * lfr_m)
+        self._s = _ext.SenseVoiceStream(
+            n_mels=n_mels,
+            lfr_m=lfr_m,
+            lfr_n=lfr_n,
+            dither=dither,
+            seed=seed,
+            cmvn_shift=None if c is None else c.shift,
+            cmvn_scale=None if c is None else c.scale,
+        )
+
+    @property
+    def feat_dim(self) -> int:
+        """Columns of the rows: ``n_mels * lfr_m``."""
+        return self._s.feat_dim
+
+    def push(self, audio: Any) -> np.ndarray:
+        """Append 16 kHz mono audio (as :func:`fbank` takes it); returns the float32
+        ``(k, feat_dim)`` rows it completes (``k`` may be 0). A chunk with NaN / inf raises
+        ``ValueError`` and is not appended."""
+        return self._s.push(as_audio(audio))
+
+    def finish(self) -> np.ndarray:
+        """End the utterance: the remaining rows (the last frames repeat the final one, as in
+        :func:`fbank`), then the stream starts over for the next utterance."""
+        return self._s.finish()
+
+    def reset(self) -> None:
+        """Drop the audio pushed since the last :meth:`finish` and start over."""
+        self._s.reset()

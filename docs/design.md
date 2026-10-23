@@ -10,7 +10,7 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
 
 - **Scope**: produce the exact input of Whisper (`log_mel`), SenseVoiceSmall (`fbank` + LFR +
   CMVN) and Qwen3-ASR (Whisper's log-mel with 128 mels, no pad / trim), and load audio files into the 16 kHz mono waveform both expect. Nothing else: no
-  general-purpose DSP, no GPU, no streaming (yet, see [Open items](#open-items)).
+  general-purpose DSP, no GPU, streaming only for the SenseVoice fbank (see [Open items](#open-items)).
 - **No dependencies**: the C core links only libc/libm. The FFT and SIMD kernels are written
   in-house; FLAC/MP3 decoding uses vendored single-header decoders (dr_flac / dr_mp3, public
   domain or MIT-0) compiled into the core.
@@ -133,6 +133,13 @@ Options can be added later without breaking `load(source)`.
   which stop one frame past the limit) ([`load.md`, "Resource use"](load.md#resource-use)).
   It was first left to callers, but checking the duration before `load` means parsing the
   header twice, and for FLAC / MP3 there is no reliable header length to check.
+- `asrfront.info` (`af_probe_memory`) runs the same detection and container parsers in a
+  probe mode that stops where the samples would be allocated, so its result and errors are
+  those of `load` (checked on every fuzz input), except for ADPCM block headers, which only
+  decoding reads. FLAC and MP3 have no reliable length in their headers, so they are decoded
+  through a small buffer to count frames. It takes the file's contents, like `load`: a
+  probe on a prefix would need every parser to report declared rather than available data
+  sizes, and a path is still read whole.
 
 ### Format detection
 
@@ -209,9 +216,10 @@ This is not legal advice; revisit it if the project is used under stricter requi
 
 ## Open items
 
-- **Streaming**: Whisper's normalization uses the max over the whole spectrogram, so chunked
-  processing changes the result; only whole-input processing is supported. A streaming kaldi
-  fbank would be straightforward (frames are independent).
+- **Streaming**: SenseVoice's fbank streams (`sensevoice.FbankStream`,
+  [`sensevoice.md`](sensevoice.md#streaming-fbankstream-af_sensevoice_stream_)). Whisper's
+  normalization uses the max over the whole spectrogram, so chunked processing changes the
+  result there; Whisper, Qwen3-ASR and Gemma 4 take whole inputs only.
 - **More models**: presets for other frontends (Paraformer, other Whisper-style models, ...).
 - **Qwen3-ASR**: long-audio chunking (`qwen-asr` cuts at low-energy points) and a librosa /
   soxr-compatible loader are not provided ([`qwen3_asr.md`](qwen3_asr.md)).

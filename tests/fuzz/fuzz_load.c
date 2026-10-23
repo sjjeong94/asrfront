@@ -4,7 +4,7 @@
  * int16 value / 32768, so it lies in [-1, 32767/32768] and is an exact multiple of 2^-15.
  * A decoded file is loaded again with af_load_memory_ex at its own length (same output) and
  * one sample less (AF_ETOOLONG). The error description is printable ASCII, set exactly for
- * AF_EUNSUPPORTED / AF_ECORRUPT. */
+ * AF_EUNSUPPORTED / AF_ECORRUPT, and af_probe_memory agrees with the load. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +32,20 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         for (size_t i = 0; i < err_len; i++)
             check(err[i] >= 0x20 && err[i] <= 0x7E);
         check((err_len > 0) == (rc == AF_ECORRUPT || rc == AF_EUNSUPPORTED));
+
+        /* af_probe_memory agrees with the load: same output length, same error and message
+         * (it may accept a file whose ADPCM block headers are corrupt: AF_ECORRUPT -> OK) */
+        af_audio_info info;
+        char perr[128];
+        int prc = af_probe_memory(data, size, modes[m], 0, &info, perr, sizeof perr);
+        if (rc == AF_OK) {
+            check(prc == AF_OK && info.n_samples == n && info.container != NULL);
+            if (n > 0)
+                check(af_probe_memory(data, size, modes[m], n - 1, &info, NULL, 0) == AF_ETOOLONG);
+        } else if (rc == AF_EUNSUPPORTED || (rc == AF_ECORRUPT && prc != AF_OK)) {
+            check(prc == rc && strcmp(perr, err) == 0);
+        }
+
         if (rc != AF_OK) {
             check(out == NULL && n == 0);
             check(rc == AF_ECORRUPT || rc == AF_EUNSUPPORTED || rc == AF_ENOMEM);

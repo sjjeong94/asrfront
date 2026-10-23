@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Union
+from typing import Callable, NamedTuple, TypeVar, Union
 
 import numpy as np
 
@@ -18,6 +18,24 @@ _TOO_LONG = "audio longer than the limit"  # af_strerror(AF_ETOOLONG)
 _SUPPORTED = "WAV, Wave64, AIFF, CAF, NIST SPHERE, FLAC, MP3, or raw PCM (s16le, 16 kHz, mono)"
 
 Source = Union[str, "os.PathLike[str]", bytes, bytearray, memoryview, np.ndarray]
+
+T = TypeVar("T")
+
+
+class AudioInfo(NamedTuple):
+    """What :func:`load` would decode, from :func:`info`."""
+
+    #: container: "WAV", "Wave64", "AIFF", "CAF", "NIST SPHERE", "FLAC", "MP3" or "raw PCM"
+    format: str
+    sample_rate: int  #: of the file, Hz
+    channels: int
+    n_frames: int  #: decoded frames at ``sample_rate``
+    n_samples: int  #: ``len(load(source))`` (16 kHz mono)
+
+    @property
+    def duration(self) -> float:
+        """Seconds of :func:`load`'s output (``n_samples / 16000``)."""
+        return self.n_samples / SAMPLE_RATE
 
 
 def load(source: Source, max_duration: float | None = None) -> np.ndarray:
@@ -41,6 +59,34 @@ def load(source: Source, max_duration: float | None = None) -> np.ndarray:
         but MP3 at common sample rates, within 1/32768 for MP3 (different decoder). See
         docs/load.md for the details.
     """
+    return _with_source(source, max_duration, _ext.load_memory)
+
+
+def info(source: Source, max_duration: float | None = None) -> AudioInfo:
+    """Inspect audio without decoding it: what :func:`load` would return, and from what.
+
+    Accepts the same ``source`` and ``max_duration`` as :func:`load` and raises the same
+    errors (``ValueError`` for an unsupported or malformed file, or audio longer than
+    ``max_duration``), but allocates no samples. Uncompressed and ADPCM formats are read from
+    their headers in constant time; FLAC and MP3 are decoded through a small buffer to count
+    their frames (stopping past ``max_duration``). One exception: ADPCM block headers are only
+    checked by :func:`load`.
+
+    Returns:
+        :class:`AudioInfo` with the container, the file's sample rate and channel count, its
+        decoded frame count, and ``n_samples == len(load(source))``.
+    """
+    container, rate, channels, n_frames, n_samples = _with_source(
+        source, max_duration, _ext.probe_memory
+    )
+    return AudioInfo(container, rate, channels, n_frames, n_samples)
+
+
+def _with_source(
+    source: Source, max_duration: object, fn: Callable[[np.ndarray, int, int], T]
+) -> T:
+    """fn(file contents as uint8, raw mode, sample limit) with load()'s source rules and
+    error messages."""
     limit = _max_samples(max_duration)
     if isinstance(source, (str, os.PathLike)):
         path = os.fspath(source)
@@ -51,9 +97,9 @@ def load(source: Source, max_duration: float | None = None) -> np.ndarray:
         # crash the interpreter with SIGBUS
         with open(path, "rb") as f:
             data = np.frombuffer(f.read(), dtype=np.uint8)
-        return _decode(data, raw, limit, repr(path), max_duration)
+        return _decode(fn, data, raw, limit, repr(path), max_duration)
     return _decode(
-        _as_bytes(source), _RAW_AUTO, limit, f"{type(source).__name__} input", max_duration
+        fn, _as_bytes(source), _RAW_AUTO, limit, f"{type(source).__name__} input", max_duration
     )
 
 
@@ -77,9 +123,16 @@ def _max_samples(max_duration: object) -> int:
 _SIZE_T_32 = np.dtype(np.uintp).itemsize == 4
 
 
-def _decode(data: np.ndarray, raw: int, limit: int, what: str, max_duration: object) -> np.ndarray:
+def _decode(
+    fn: Callable[[np.ndarray, int, int], T],
+    data: np.ndarray,
+    raw: int,
+    limit: int,
+    what: str,
+    max_duration: object,
+) -> T:
     try:
-        return _ext.load_memory(data, raw, limit)
+        return fn(data, raw, limit)
     except ValueError as e:
         if str(e).startswith(_TOO_LONG):
             raise ValueError(

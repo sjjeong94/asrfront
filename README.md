@@ -41,6 +41,10 @@ audio = asrfront.load("speech.wav")  # path (str / os.PathLike)
 audio = asrfront.load(request_body)  # bytes / bytearray / memoryview / uint8 array
 audio = asrfront.load("stream.pcm")  # raw s16le 16 kHz mono (.pcm / .raw, or headerless bytes)
 audio = asrfront.load(upload, max_duration=600)  # ValueError if longer than 10 min
+
+info = asrfront.info(upload)  # without decoding: AudioInfo(format='WAV', sample_rate=44100,
+                              #   channels=2, n_frames=..., n_samples=len(load(upload)))
+info.duration  # seconds of the 16 kHz output
 ```
 
 Returns a 1-D float32 array at 16 kHz mono (`asrfront.SAMPLE_RATE`), the input both Whisper and
@@ -91,6 +95,10 @@ feat = sensevoice.fbank(audio, cmvn="path/to/am.mvn")  # (ceil(T / 6), 560)
 feats, lengths = sensevoice.fbank_batch([a1, a2], cmvn="path/to/am.mvn")  # zero-padded
 raw = sensevoice.fbank_raw(audio)  # (T, 80) kaldi fbank only
 shift, scale = sensevoice.load_cmvn("path/to/am.mvn")
+
+stream = sensevoice.FbankStream(cmvn="path/to/am.mvn")  # streaming, e.g. microphone input
+rows = stream.push(chunk)  # (k, 560): the rows this chunk completes, any chunk size
+rows = stream.finish()  # the last rows; together exactly fbank(whole audio)
 ```
 
 Equivalent to FunASR's `WavFrontend` (`torchaudio.compliance.kaldi.fbank` on the int16-scaled

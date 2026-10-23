@@ -78,6 +78,64 @@ def test_bytes_equal_path(tmp_path):
         np.testing.assert_array_equal(asrfront.load(src), expected)
 
 
+@pytest.mark.parametrize("kind", ["u8", "s16", "s16_44k_stereo", "s32", "f32", "f64", "raw"])
+def test_unaligned_input(tmp_path, kind):
+    """Samples are read in place when aligned and converted otherwise: same output."""
+    rng = np.random.default_rng(1)
+    if kind in ("f32", "f64"):
+        x = (rng.standard_normal(4001) * 0.3).astype(np.float32 if kind == "f32" else np.float64)
+        data = _float_wav(tmp_path / "a.wav", x).read_bytes()
+    elif kind == "raw":
+        data = noise_s16(4001).tobytes()
+    else:
+        width = {"u8": 1, "s32": 4}.get(kind, 2)
+        ch, sr = (2, 44100) if kind == "s16_44k_stereo" else (1, 16000)
+        body = rng.integers(0, 256, 4001 * ch * width, dtype=np.uint8).tobytes()
+        with wave.open(str(tmp_path / "a.wav"), "wb") as w:
+            w.setnchannels(ch)
+            w.setsampwidth(width)
+            w.setframerate(sr)
+            w.writeframes(body)
+        data = (tmp_path / "a.wav").read_bytes()
+    expected = asrfront.load(bytes(data))
+    for offset in range(8):
+        buf = np.zeros(len(data) + 8, np.uint8)
+        buf[offset : offset + len(data)] = np.frombuffer(data, np.uint8)
+        np.testing.assert_array_equal(asrfront.load(buf[offset : offset + len(data)]), expected)
+
+
+@pytest.mark.parametrize("path", CORPUS, ids=lambda p: p.name)
+def test_info_matches_load(path):
+    data = path.read_bytes()
+    raw = path.suffix in (".pcm", ".raw")
+    for src in [path] if raw else [path, data]:
+        try:
+            y = asrfront.load(src)
+        except ValueError as e:
+            try:
+                asrfront.info(src)  # may pass: ADPCM block headers are checked by load only
+            except ValueError as e2:
+                assert str(e2) == str(e)
+            continue
+        info = asrfront.info(src)
+        assert isinstance(info, asrfront.AudioInfo)
+        assert info.n_samples == len(y) and info.duration == len(y) / 16000
+        assert info.channels >= 1 and info.sample_rate >= 1000 and info.n_frames >= 0
+        if len(y) > 1:
+            with pytest.raises(ValueError, match="longer than max_duration"):
+                asrfront.info(src, max_duration=(len(y) - 1) / 16000)
+            assert asrfront.info(src, max_duration=len(y) / 16000) == info
+
+
+def test_info_fields(tmp_path):
+    path = write_wav(tmp_path / "a.wav", noise_s16(44100, 2), sr=44100)
+    info = asrfront.info(path)
+    assert info == ("WAV", 44100, 2, 44100, len(asrfront.load(path)))
+    assert asrfront.info(noise_s16(1600).tobytes()) == ("raw PCM", 16000, 1, 1600, 1600)
+    with pytest.raises(ValueError, match="MP4"):
+        asrfront.info(b"\0\0\0\x20ftypM4A " + bytes(64))
+
+
 def test_raw_pcm(tmp_path):
     x = noise_s16(3001)
     expected = x.astype(np.float32) / 32768

@@ -226,12 +226,98 @@ static void test_misc(void) {
     CHECK(strcmp(af_strerror(AF_EINVAL), "invalid argument") == 0);
 }
 
+/* Streaming fbank: the rows of pushes of random sizes and the finish are af_sensevoice_fbank of
+ * the whole input, bit for bit. */
+static void test_sensevoice_stream(void) {
+    static const int lfr[][2] = {{7, 6}, {1, 1}, {1, 6}, {11, 1}, {4, 9}, {7, 6}};
+    const size_t lengths[] = {0, 399, 400, 401, 560, 1100, 16000, 37777};
+    unsigned rng = 12345;
+    float *audio = malloc(37777 * sizeof(float));
+    for (size_t i = 0; i < 37777; i++) {
+        rng = rng * 1103515245u + 12345u;
+        audio[i] = (float)((int)(rng >> 9) % 20001 - 10000) / 32768.0f;
+    }
+    for (size_t c = 0; c < sizeof lfr / sizeof lfr[0]; c++) {
+        af_sensevoice_config cfg;
+        af_sensevoice_default_config(&cfg);
+        cfg.lfr_m = lfr[c][0];
+        cfg.lfr_n = lfr[c][1];
+        const size_t dim = (size_t)cfg.n_mels * (size_t)cfg.lfr_m;
+        float *shift = NULL, *scale = NULL;
+        if (c == 0) { /* dither */
+            cfg.dither = 1.0f;
+            cfg.seed = 7;
+        } else if (c == 5) { /* CMVN */
+            shift = malloc(dim * sizeof(float));
+            scale = malloc(dim * sizeof(float));
+            for (size_t d = 0; d < dim; d++) {
+                shift[d] = -(float)d * 0.01f;
+                scale[d] = 0.5f + (float)d * 0.001f;
+            }
+            cfg.cmvn_shift = shift;
+            cfg.cmvn_scale = scale;
+        }
+        af_sensevoice *h = NULL;
+        af_sensevoice_stream *s = NULL;
+        CHECK(af_sensevoice_create(&cfg, &h) == AF_OK);
+        CHECK(af_sensevoice_stream_create(&cfg, &s) == AF_OK);
+        if (!h || !s)
+            return;
+        CHECK(af_sensevoice_feat_dim(af_sensevoice_stream_frontend(s)) == dim);
+        for (size_t li = 0; li < sizeof lengths / sizeof lengths[0]; li++) {
+            const size_t n = lengths[li], rows = af_sensevoice_out_frames(h, n);
+            float *want = malloc((rows + 1) * dim * sizeof(float));
+            float *got = malloc((rows + 1) * dim * sizeof(float));
+            CHECK(af_sensevoice_fbank(h, audio, n, want) == AF_OK);
+            for (int rep = 0; rep < 3; rep++) { /* also: a finished stream starts over */
+                size_t pos = 0, k = 0;
+                while (pos < n) {
+                    rng = rng * 1103515245u + 12345u;
+                    size_t step = rep == 0 ? 1 + (rng >> 8) % 700 : rep == 1 ? n : 160;
+                    step = step < n - pos ? step : n - pos;
+                    const size_t expect = af_sensevoice_stream_push_rows(s, step);
+                    size_t got_rows = (size_t)-1;
+                    CHECK(af_sensevoice_stream_push(s, audio + pos, step, got + k * dim,
+                                                    &got_rows) == AF_OK);
+                    CHECK(got_rows == expect);
+                    k += got_rows;
+                    pos += step;
+                }
+                const size_t expect = af_sensevoice_stream_finish_rows(s);
+                size_t got_rows = (size_t)-1;
+                CHECK(af_sensevoice_stream_finish(s, got + k * dim, &got_rows) == AF_OK);
+                CHECK(got_rows == expect);
+                k += got_rows;
+                CHECK(k == rows);
+                CHECK(k != rows || memcmp(got, want, rows * dim * sizeof(float)) == 0);
+            }
+            free(want);
+            free(got);
+        }
+        size_t r = 0;
+        CHECK(af_sensevoice_stream_push(s, NULL, 1, NULL, &r) == AF_EINVAL);
+        CHECK(af_sensevoice_stream_push(s, audio, 0, NULL, &r) == AF_OK && r == 0);
+        CHECK(af_sensevoice_stream_push(s, audio, 2000, NULL, &r) == AF_EINVAL); /* rows due */
+        af_sensevoice_stream_reset(s);
+        CHECK(af_sensevoice_stream_finish_rows(s) == 0);
+        af_sensevoice_stream_destroy(s);
+        af_sensevoice_destroy(h);
+        free(shift);
+        free(scale);
+    }
+    af_sensevoice_stream *s = NULL;
+    CHECK(af_sensevoice_stream_create(NULL, &s) == AF_EINVAL && s == NULL);
+    af_sensevoice_stream_destroy(NULL);
+    free(audio);
+}
+
 int main(void) {
     test_whisper();
     test_whisper_silence_skip();
     test_whisper_padded();
     test_whisper_ld();
     test_sensevoice();
+    test_sensevoice_stream();
     test_gemma4();
     test_misc();
     if (failures) {

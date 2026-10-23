@@ -38,7 +38,7 @@ enum {
 
 #define AF_MAX_CHANNELS 18 /* one per mask bit */
 
-/* Decoded audio: interleaved samples in `fmt`, native endianness, owned. */
+/* Decoded audio: interleaved samples in `fmt`, native endianness, owned unless `borrowed`. */
 typedef struct af_decoded {
     af_sample_fmt fmt;
     int channels;
@@ -46,6 +46,12 @@ typedef struct af_decoded {
     uint32_t layout[AF_MAX_CHANNELS]; /* position bit per channel */
     size_t n_frames;
     void *data;
+    /* data points into the caller's input buffer (af_pcm_decode_frames on native-layout
+     * samples): read-only, valid only while that buffer is, not freed by af_decoded_free */
+    int borrowed;
+    /* set by the caller before decoding: stop once n_frames is known, without decoding or
+     * allocating the samples (af_probe_memory); the decoder then returns AF_PROBED */
+    int probe;
     size_t limit;    /* the caller's limit in 16 kHz samples (0: none); see af_frame_limit */
     char detail[96]; /* why decoding failed, if known (af_fail) */
 } af_decoded;
@@ -58,12 +64,19 @@ int af_fail(af_decoded *d, int rc, const char *fmt, ...)
 #endif
     ;
 
+/* Internal success code of a decoder in probe mode: n_frames, channels and sample_rate are
+ * set, data is NULL. Never returned by the public API. */
+#define AF_PROBED 1
+
+/* Clear *d for a decoder (keeping d->probe) and set its limit. */
+void af_decoded_init(af_decoded *d, size_t limit);
 void af_decoded_free(af_decoded *d);
 /* Most frames at d->sample_rate that resample to at most d->limit samples at 16 kHz
  * (SIZE_MAX if there is no limit). */
 size_t af_frame_limit(const af_decoded *d);
 /* Allocate d->data for d->n_frames * d->channels samples of `fmt` and set d->fmt;
- * AF_ETOOLONG if d->n_frames exceeds af_frame_limit(d). */
+ * AF_ETOOLONG if d->n_frames exceeds af_frame_limit(d). In probe mode nothing is allocated
+ * and it returns AF_PROBED, which callers pass on as they do errors. */
 int af_decoded_alloc(af_decoded *d, af_sample_fmt fmt);
 
 /* Coded sample formats of the uncompressed codecs (pcm.c). */
@@ -87,8 +100,10 @@ typedef enum {
 int af_pcm_bytes(af_pcm_codec c); /* bytes per sample */
 /* Convert d->n_frames * d->channels coded samples at src into d->data (sets d->fmt). */
 int af_pcm_convert(af_decoded *d, af_pcm_codec c, const uint8_t *src);
-/* As af_pcm_convert for all whole frames in `size` bytes (sets d->n_frames). On error
- * d->data is freed. */
+/* As af_pcm_convert for all whole frames in `size` bytes (sets d->n_frames). Samples that
+ * are already in their decoded layout (u8, and little-endian s16 / s32 / f32 / f64 on a
+ * little-endian host, suitably aligned) are not copied: d->data borrows src (d->borrowed).
+ * On error d->data is freed. */
 int af_pcm_decode_frames(af_decoded *d, af_pcm_codec c, const uint8_t *src, size_t size);
 
 /* ADPCM codecs (adpcm.c), decoded to s16 with ffmpeg's arithmetic. d->channels must be set;

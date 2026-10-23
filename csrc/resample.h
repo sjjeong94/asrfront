@@ -38,6 +38,10 @@ const double *af_resampler_bank(const af_resampler *r, int m);
 
 /* Number of output samples for n input samples. */
 size_t af_resampler_out_len(const af_resampler *r, size_t n);
+/* The same without a resampler (rates > 0). */
+size_t af_resample_len(int sr_in, int sr_out, size_t n);
+/* AF_OK if af_resampler_create would accept the rates (no allocation), else AF_EUNSUPPORTED. */
+int af_resample_check(int sr_in, int sr_out);
 /* The largest n whose af_resampler_out_len() from sr_in to sr_out is at most max_out
  * (SIZE_MAX if it does not fit). Needs no resampler. */
 size_t af_resample_max_in(int sr_in, int sr_out, size_t max_out);

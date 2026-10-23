@@ -369,7 +369,10 @@ raw PCM is never taken for MP3).
 
 `load` decodes the whole file before downmixing and resampling, so its peak memory is about
 the decoded size (all channels, at the input rate, 2–8 bytes per sample) plus the 16 kHz mono
-float32 output. That is proportional to the audio's duration, not to the file size:
+float32 output. Samples already stored in their decoded layout (8-bit unsigned, and
+little-endian 16 / 32-bit integer and float on little-endian hosts, at an aligned offset) are
+read in place from the input instead, so for those the input itself is the decoded size (a
+10 min 44.1 kHz stereo s16 WAV: 141 MB instead of 245 MB, input bytes included). That is proportional to the audio's duration, not to the file size:
 
 | Input | Peak memory per byte of file (measured worst cases) |
 |---|---|

@@ -94,12 +94,8 @@ int af_resampler_create(int sr_in, int sr_out, af_resampler **out) {
     return af_resampler_create_banks(sr_in, sr_out, AF_BANK_ALL, out);
 }
 
-int af_resampler_create_banks(int sr_in, int sr_out, int banks, af_resampler **out) {
-    if (!out)
-        return AF_EINVAL;
-    *out = NULL;
-    if (banks <= 0 || (banks & ~AF_BANK_ALL))
-        return AF_EINVAL;
+/* Filter length N for the rates and its float row stride; AF_EUNSUPPORTED if not supported. */
+static int filter_size(int sr_in, int sr_out, double *fc_out, int *n_taps_out, int *width_out) {
     if (sr_in < AF_RESAMPLE_MIN_RATE || sr_in > AF_RESAMPLE_MAX_RATE ||
         sr_out < AF_RESAMPLE_MIN_RATE || sr_out > AF_RESAMPLE_MAX_RATE)
         return AF_EUNSUPPORTED;
@@ -111,6 +107,29 @@ int af_resampler_create_banks(int sr_in, int sr_out, int banks, af_resampler **o
     const int width = (n_taps + LANES - 1) / LANES * LANES;
     if (width > MAX_WIDTH)
         return AF_EUNSUPPORTED;
+    *fc_out = fc;
+    *n_taps_out = n_taps;
+    *width_out = width;
+    return AF_OK;
+}
+
+int af_resample_check(int sr_in, int sr_out) {
+    double fc;
+    int n_taps, width;
+    return filter_size(sr_in, sr_out, &fc, &n_taps, &width);
+}
+
+int af_resampler_create_banks(int sr_in, int sr_out, int banks, af_resampler **out) {
+    if (!out)
+        return AF_EINVAL;
+    *out = NULL;
+    if (banks <= 0 || (banks & ~AF_BANK_ALL))
+        return AF_EINVAL;
+    double fc;
+    int n_taps, width;
+    const int rc = filter_size(sr_in, sr_out, &fc, &n_taps, &width);
+    if (rc != AF_OK)
+        return rc;
 
     af_resampler *r = calloc(1, sizeof(*r));
     if (!r)
@@ -167,7 +186,7 @@ int af_resampler_create_banks(int sr_in, int sr_out, int banks, af_resampler **o
         free(r->bank);
         r->bank = NULL;
     }
-    r->kern = af_kernels_select(); /* once: the selection runs cpuid (slow in VMs) */
+    r->kern = af_kernels_select(); /* once per resampler, not per call */
     *out = r;
     return AF_OK;
 }
@@ -320,14 +339,23 @@ const double *af_resampler_bank(const af_resampler *r, int m) {
     return r->bank + (size_t)m * r->n_taps;
 }
 
-size_t af_resampler_out_len(const af_resampler *r, size_t n) {
-    if (r->sr_in == r->sr_out)
+static size_t out_len(int sr_in, int sr_out, uint64_t p, uint64_t q, size_t n) {
+    if (sr_in == sr_out)
         return n;
     if (n == 0)
         return 0;
     /* docs/load.md "Output length": ffmpeg's exact count is not reproducible */
-    uint64_t m = r->sr_in > 2 * r->sr_out ? (uint64_t)n - 1 : (uint64_t)n;
-    return (size_t)((m * r->q + r->p - 1) / r->p);
+    uint64_t m = sr_in > 2 * sr_out ? (uint64_t)n - 1 : (uint64_t)n;
+    return (size_t)((m * q + p - 1) / p);
+}
+
+size_t af_resampler_out_len(const af_resampler *r, size_t n) {
+    return out_len(r->sr_in, r->sr_out, r->p, r->q, n);
+}
+
+size_t af_resample_len(int sr_in, int sr_out, size_t n) {
+    const uint64_t g = gcd_u64((uint64_t)sr_in, (uint64_t)sr_out);
+    return out_len(sr_in, sr_out, (uint64_t)sr_in / g, (uint64_t)sr_out / g, n);
 }
 
 size_t af_resample_max_in(int sr_in, int sr_out, size_t max_out) {

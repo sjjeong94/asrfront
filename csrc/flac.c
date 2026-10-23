@@ -49,8 +49,7 @@ static void on_meta(void *user, drflac_metadata *m) {
 }
 
 int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
-    memset(out, 0, sizeof(*out));
-    out->limit = limit;
+    af_decoded_init(out, limit);
     uint32_t mask = 0;
     drflac *f = drflac_open_memory_with_metadata(buf, size, on_meta, &mask, NULL);
     if (!f)
@@ -66,6 +65,22 @@ int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
     out->sample_rate = (int)f->sampleRate;
     /* Frames past the caller's limit are an error: decoding one more than the limit tells. */
     const size_t lim = af_frame_limit(out), lim_cap = lim < SIZE_MAX ? lim + 1 : SIZE_MAX;
+    if (!mask || af_mask_layout(mask, ch, out->layout) != AF_OK)
+        memcpy(out->layout, flac_layouts[ch - 1], (size_t)ch * sizeof(uint32_t));
+    if (out->probe) {
+        /* The header's total is only a hint (0, or more than a truncated file holds): count
+         * the frames a load decodes, through a small buffer. */
+        int32_t scratch[4096];
+        size_t n = 0;
+        drflac_uint64 got;
+        while (n <= lim && (got = drflac_read_pcm_frames_s32(
+                                f, sizeof scratch / sizeof *scratch / (size_t)ch, scratch)) > 0)
+            n += (size_t)got;
+        drflac_close(f);
+        out->n_frames = n;
+        out->fmt = bps <= 16 ? AF_SFMT_S16 : AF_SFMT_S32;
+        return n > lim ? AF_ETOOLONG : AF_PROBED;
+    }
     /* Decode as left-justified s32, growing the buffer: the header's total may be 0 (unknown)
      * or larger than what a truncated file holds. It is a hint only, never trusted beyond the
      * input size: a 10 kB file claiming 2^28 frames must not allocate gigabytes up front. */
@@ -98,8 +113,6 @@ int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
         n += (size_t)got;
     }
     out->n_frames = n;
-    if (!mask || af_mask_layout(mask, ch, out->layout) != AF_OK)
-        memcpy(out->layout, flac_layouts[ch - 1], (size_t)ch * sizeof(uint32_t));
     drflac_close(f);
     if (!pcm)
         return AF_ENOMEM;

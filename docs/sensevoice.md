@@ -271,6 +271,19 @@ random numbers.
 As for Whisper, there is no FMA or reassociation, so all kernel builds (AVX2, SSE2/NEON,
 plain C) give bit-identical results.
 
+### Streaming (`FbankStream`, `af_sensevoice_stream_*`)
+
+Frames are independent and LFR row `i` reads raw frames up to `i · lfr_n − left + lfr_m − 1`,
+so a row is final once the audio holds that frame (with `m = 7, n = 6`: one row per 60 ms,
+the first after 60 ms). The stream keeps the samples of frames not computed yet (fewer than
+`max(lfr_n, lfr_m)` frames, plus one input step of 64 frames) and the same raw-frame ring as
+the whole-input path, and computes frames with the same chunking rule; only the frames per
+SIMD block differ, which does not change any lane. Dither is drawn in frame order from an RNG
+seeded at the start of each utterance. So the rows of all pushes and the finish equal
+`fbank` of the concatenated audio bit for bit (tested for random splits, dither, CMVN and
+`lfr_n > lfr_m`). The finish emits the remaining rows with the last frame repeated, as the
+whole-input path does, and resets the stream.
+
 ## Accuracy
 
 Against a float64 NumPy port of `kaldi.fbank` + `apply_lfr` + `apply_cmvn`

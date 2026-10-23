@@ -204,6 +204,58 @@ int af_sensevoice_fbank_raw(af_sensevoice *h, const float *audio, size_t n_sampl
     return AF_OK;
 }
 
+/* Raw frames [*done, end) of the signal whose frame t starts at audio + (t - base) * shift,
+ * into the ring, in blocks of AF_VL. A block also stops at the end of the ring (a stream's
+ * frames need not start at a multiple of AF_VL); frames do not depend on their block. */
+static void compute_frames(af_sensevoice *h, const float *audio, size_t base, size_t *done,
+                           size_t end) {
+    const size_t n_mels = (size_t)h->cfg.n_mels;
+    while (*done < end) {
+        size_t count = end - *done < AF_VL ? end - *done : AF_VL;
+        const size_t room = h->ring_frames - *done % h->ring_frames;
+        count = count < room ? count : room;
+        fbank_block(h, audio, *done - base, (int)count, h->ring + *done % h->ring_frames * n_mels);
+        *done += count;
+    }
+}
+
+/* Last raw frame LFR row i reads (before clamping to the last frame). */
+static ptrdiff_t row_last_frame(const af_sensevoice *h, size_t i) {
+    const ptrdiff_t m = h->cfg.lfr_m, n = h->cfg.lfr_n, left = (m - 1) / 2;
+    return (ptrdiff_t)i * n - left + m - 1;
+}
+
+/* Compute raw frames up to the last one LFR row i reads (clamped to `last`), LFR_CHUNK at a
+ * time (FFT and LFR passes keep their data in cache), from the n_raw frames available. Frames
+ * below the row's first one are not read again, so the ring never overwrites a needed frame. */
+static void frames_for_row(af_sensevoice *h, const float *audio, size_t base, size_t *done,
+                           size_t n_raw, size_t i, ptrdiff_t last) {
+    ptrdiff_t hi = row_last_frame(h, i);
+    hi = hi > last ? last : hi;
+    while ((ptrdiff_t)*done <= hi)
+        compute_frames(h, audio, base, done, n_raw - *done < LFR_CHUNK ? n_raw : *done + LFR_CHUNK);
+}
+
+/* LFR (+ CMVN) row i from the ring, raw frame indices clamped to [0, last]. */
+static void lfr_row(const af_sensevoice *h, size_t i, ptrdiff_t last, float *row) {
+    const size_t n_mels = (size_t)h->cfg.n_mels;
+    const ptrdiff_t m = h->cfg.lfr_m, n = h->cfg.lfr_n, left = (m - 1) / 2;
+    const float *shift = h->cfg.cmvn_shift, *scale = h->cfg.cmvn_scale;
+    for (ptrdiff_t j = 0; j < m; j++) {
+        ptrdiff_t src = (ptrdiff_t)i * n - left + j;
+        src = src < 0 ? 0 : (src > last ? last : src);
+        const size_t offset = (size_t)j * n_mels;
+        const float *raw = h->ring + (size_t)src % h->ring_frames * n_mels;
+        if (shift) {
+            /* Copy and normalize together, preserving (x + shift) * scale. */
+            for (size_t d = 0; d < n_mels; d++)
+                row[offset + d] = (raw[d] + shift[offset + d]) * scale[offset + d];
+        } else {
+            memcpy(row + offset, raw, n_mels * sizeof(float));
+        }
+    }
+}
+
 /*
  * LFR (FunASR apply_lfr): output row i concatenates raw frames
  * i * lfr_n - left + j, j < lfr_m, with left = (lfr_m - 1) / 2; indices before the
@@ -217,42 +269,144 @@ int af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, 
     const size_t n_out = af_sensevoice_out_frames(h, n_samples);
     if (n_raw == 0)
         return AF_OK;
-
-    const size_t n_mels = (size_t)h->cfg.n_mels;
-    const ptrdiff_t m = h->cfg.lfr_m, n = h->cfg.lfr_n, left = (m - 1) / 2;
     const ptrdiff_t last = (ptrdiff_t)n_raw - 1;
-    const size_t dim = n_mels * (size_t)m;
-    const float *shift = h->cfg.cmvn_shift, *scale = h->cfg.cmvn_scale;
+    const size_t dim = af_sensevoice_feat_dim(h);
     h->rng = splitmix64(h->cfg.seed); /* as in fbank_raw(): every frame, in order */
     size_t done = 0;                  /* raw frames computed; a multiple of AF_VL until the end */
     for (size_t i = 0; i < n_out; i++) {
-        /* Compute raw frames, LFR_CHUNK at a time (FFT and LFR passes keep their data in
-         * cache), up to the last one this row reads. Frames below its first one,
-         * i * n - left, are not read again, so the ring never overwrites a needed frame. */
-        ptrdiff_t hi = (ptrdiff_t)i * n - left + m - 1;
-        hi = hi > last ? last : hi;
-        while ((ptrdiff_t)done <= hi) {
-            const size_t end = n_raw - done < LFR_CHUNK ? n_raw : done + LFR_CHUNK;
-            while (done < end) {
-                const int count = end - done < AF_VL ? (int)(end - done) : AF_VL;
-                fbank_block(h, audio, done, count, h->ring + done % h->ring_frames * n_mels);
-                done += (size_t)count;
-            }
-        }
-        float *row = out + i * dim;
-        for (ptrdiff_t j = 0; j < m; j++) {
-            ptrdiff_t src = (ptrdiff_t)i * n - left + j;
-            src = src < 0 ? 0 : (src > last ? last : src);
-            const size_t offset = (size_t)j * n_mels;
-            const float *raw = h->ring + (size_t)src % h->ring_frames * n_mels;
-            if (shift) {
-                /* Copy and normalize together, preserving (x + shift) * scale. */
-                for (size_t d = 0; d < n_mels; d++)
-                    row[offset + d] = (raw[d] + shift[offset + d]) * scale[offset + d];
-            } else {
-                memcpy(row + offset, raw, n_mels * sizeof(float));
-            }
-        }
+        frames_for_row(h, audio, 0, &done, n_raw, i, last);
+        lfr_row(h, i, last, out + i * dim);
     }
+    return AF_OK;
+}
+
+/* ---------------------------------------------------------------------------------- */
+/* Streaming                                                                          */
+/* ---------------------------------------------------------------------------------- */
+
+/* Input taken per step of af_sensevoice_stream_push: bounds the sample buffer. */
+#define STREAM_STEP (LFR_CHUNK * KALDI_FRAME_SHIFT)
+
+struct af_sensevoice_stream {
+    af_sensevoice *h; /* config, kernels, ring of raw frames, dither RNG */
+    float *buf;       /* samples from the start of frame `base` on */
+    size_t buf_len, buf_cap;
+    size_t base;      /* first frame whose samples buf holds (= done after each step) */
+    size_t n_samples; /* pushed since the start */
+    size_t done;      /* raw frames computed */
+    size_t next_row;  /* LFR rows emitted */
+};
+
+int af_sensevoice_stream_create(const af_sensevoice_config *cfg, af_sensevoice_stream **out) {
+    if (!out)
+        return AF_EINVAL;
+    *out = NULL;
+    af_sensevoice_stream *s = calloc(1, sizeof(*s));
+    if (!s)
+        return AF_ENOMEM;
+    int rc = af_sensevoice_create(cfg, &s->h);
+    if (rc != AF_OK) {
+        free(s);
+        return rc;
+    }
+    /* frames not yet computed span at most lfr_n + lfr_m frames, plus one step of input */
+    s->buf_cap = ((size_t)s->h->cfg.lfr_n + (size_t)s->h->cfg.lfr_m + 2) * KALDI_FRAME_SHIFT +
+                 KALDI_FRAME_LENGTH + STREAM_STEP;
+    s->buf = malloc(s->buf_cap * sizeof(float));
+    if (!s->buf) {
+        af_sensevoice_stream_destroy(s);
+        return AF_ENOMEM;
+    }
+    af_sensevoice_stream_reset(s);
+    *out = s;
+    return AF_OK;
+}
+
+void af_sensevoice_stream_destroy(af_sensevoice_stream *s) {
+    if (!s)
+        return;
+    af_sensevoice_destroy(s->h);
+    free(s->buf);
+    free(s);
+}
+
+void af_sensevoice_stream_reset(af_sensevoice_stream *s) {
+    s->buf_len = s->base = s->n_samples = s->done = s->next_row = 0;
+    s->h->rng = splitmix64(s->h->cfg.seed);
+}
+
+const af_sensevoice *af_sensevoice_stream_frontend(const af_sensevoice_stream *s) {
+    return s->h;
+}
+
+/* LFR rows that read only frames among the first n_raw (none past the end, so they are final). */
+static size_t rows_ready(const af_sensevoice *h, size_t n_raw) {
+    const size_t m = (size_t)h->cfg.lfr_m, n = (size_t)h->cfg.lfr_n, left = (m - 1) / 2;
+    return n_raw + left < m ? 0 : (n_raw + left - m) / n + 1;
+}
+
+size_t af_sensevoice_stream_push_rows(const af_sensevoice_stream *s, size_t n_samples) {
+    const size_t total = n_samples > SIZE_MAX - s->n_samples ? SIZE_MAX : s->n_samples + n_samples;
+    return rows_ready(s->h, af_sensevoice_raw_frames(s->h, total)) - s->next_row;
+}
+
+size_t af_sensevoice_stream_finish_rows(const af_sensevoice_stream *s) {
+    return af_sensevoice_out_frames(s->h, s->n_samples) - s->next_row;
+}
+
+/* Emit the rows that the frames of the samples so far make final (end = 0), or all remaining
+ * rows, the last frame repeated past the end (end = 1). */
+static size_t emit_rows(af_sensevoice_stream *s, int end, float *out) {
+    af_sensevoice *h = s->h;
+    const size_t n_raw = af_sensevoice_raw_frames(h, s->n_samples);
+    const size_t n_rows = end ? af_sensevoice_out_frames(h, s->n_samples) : rows_ready(h, n_raw);
+    const ptrdiff_t last = (ptrdiff_t)n_raw - 1; /* rows_ready() rows never reach it */
+    const size_t dim = af_sensevoice_feat_dim(h);
+    size_t k = 0;
+    for (; s->next_row < n_rows; s->next_row++, k++) {
+        frames_for_row(h, s->buf, s->base, &s->done, n_raw, s->next_row, last);
+        lfr_row(h, s->next_row, last, out + k * dim);
+    }
+    return k;
+}
+
+int af_sensevoice_stream_push(af_sensevoice_stream *s, const float *audio, size_t n_samples,
+                              float *out, size_t *n_rows) {
+    if (!s || !n_rows || (!audio && n_samples))
+        return AF_EINVAL;
+    *n_rows = 0;
+    if (af_sensevoice_stream_push_rows(s, n_samples) > 0 && !out)
+        return AF_EINVAL;
+    if (n_samples > SIZE_MAX - s->n_samples)
+        return AF_EINVAL;
+    const size_t dim = af_sensevoice_feat_dim(s->h);
+    while (n_samples > 0) {
+        /* Drop the samples of computed frames: the next frame starts at sample done * shift. */
+        const size_t drop = (s->done - s->base) * KALDI_FRAME_SHIFT;
+        if (drop > 0) {
+            s->buf_len = drop < s->buf_len ? s->buf_len - drop : 0;
+            memmove(s->buf, s->buf + drop, s->buf_len * sizeof(float));
+            s->base = s->done;
+        }
+        const size_t take = n_samples < STREAM_STEP ? n_samples : STREAM_STEP;
+        memcpy(s->buf + s->buf_len, audio, take * sizeof(float));
+        s->buf_len += take;
+        s->n_samples += take;
+        audio += take;
+        n_samples -= take;
+        const size_t k = emit_rows(s, 0, out ? out + *n_rows * dim : NULL);
+        *n_rows += k;
+    }
+    return AF_OK;
+}
+
+int af_sensevoice_stream_finish(af_sensevoice_stream *s, float *out, size_t *n_rows) {
+    if (!s || !n_rows)
+        return AF_EINVAL;
+    *n_rows = 0;
+    if (af_sensevoice_stream_finish_rows(s) > 0 && !out)
+        return AF_EINVAL;
+    *n_rows = emit_rows(s, 1, out);
+    af_sensevoice_stream_reset(s);
     return AF_OK;
 }

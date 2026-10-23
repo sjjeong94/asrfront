@@ -54,10 +54,19 @@ int af_fail(af_decoded *d, int rc, const char *fmt, ...) {
     return rc;
 }
 
+void af_decoded_init(af_decoded *d, size_t limit) {
+    const int probe = d->probe;
+    memset(d, 0, sizeof(*d));
+    d->probe = probe;
+    d->limit = limit;
+}
+
 void af_decoded_free(af_decoded *d) {
     if (d) {
-        free(d->data);
+        if (!d->borrowed)
+            free(d->data);
         d->data = NULL;
+        d->borrowed = 0;
     }
 }
 
@@ -67,19 +76,57 @@ size_t af_frame_limit(const af_decoded *d) {
     return af_resample_max_in(d->sample_rate, AF_SAMPLE_RATE, d->limit);
 }
 
-int af_decoded_alloc(af_decoded *d, af_sample_fmt fmt) {
-    static const size_t elem_size[] = {1, 2, 4, 4, 8}; /* by af_sample_fmt */
-    size_t es = elem_size[fmt];
+static const size_t elem_size[] = {1, 2, 4, 4, 8}; /* by af_sample_fmt */
+
+/* The checks of af_decoded_alloc: AF_OK if d->n_frames * d->channels samples of `fmt` are
+ * within the caller's limit and fit in a size_t of bytes. */
+static int check_size(const af_decoded *d, af_sample_fmt fmt) {
     if (d->n_frames > af_frame_limit(d))
         return AF_ETOOLONG;
     size_t n = d->n_frames * (size_t)d->channels;
     if (d->channels > 0 && n / (size_t)d->channels != d->n_frames)
         return AF_ECORRUPT;
-    if (n > SIZE_MAX / es)
+    if (n > SIZE_MAX / elem_size[fmt])
         return AF_ENOMEM;
+    return AF_OK;
+}
+
+int af_decoded_alloc(af_decoded *d, af_sample_fmt fmt) {
+    int rc = check_size(d, fmt);
+    if (rc != AF_OK)
+        return rc;
+    size_t bytes = d->n_frames * (size_t)d->channels * elem_size[fmt];
     d->fmt = fmt;
-    d->data = malloc(n * es > 0 ? n * es : 1);
+    d->borrowed = 0;
+    if (d->probe)
+        return AF_PROBED;
+    d->data = malloc(bytes > 0 ? bytes : 1);
     return d->data ? AF_OK : AF_ENOMEM;
+}
+
+/* The decoded format whose in-memory layout coded samples of `c` already have (so they can be
+ * read in place), or -1. */
+static int native_fmt(af_pcm_codec c) {
+    static const union {
+        uint16_t u;
+        uint8_t b[2];
+    } probe = {1};
+    if (c == AF_PCM_U8)
+        return AF_SFMT_U8;
+    if (!probe.b[0]) /* big-endian host: every multi-byte codec is converted */
+        return -1;
+    switch (c) {
+    case AF_PCM_S16LE:
+        return AF_SFMT_S16;
+    case AF_PCM_S32LE:
+        return AF_SFMT_S32;
+    case AF_PCM_F32LE:
+        return AF_SFMT_F32;
+    case AF_PCM_F64LE:
+        return AF_SFMT_F64;
+    default:
+        return -1;
+    }
 }
 
 int af_pcm_bytes(af_pcm_codec c) {
@@ -198,15 +245,26 @@ int af_pcm_convert(af_decoded *d, af_pcm_codec c, const uint8_t *src) {
 int af_pcm_decode_frames(af_decoded *d, af_pcm_codec c, const uint8_t *src, size_t size) {
     size_t frame = (size_t)af_pcm_bytes(c) * (size_t)d->channels;
     d->n_frames = size / frame; /* a partial last frame is dropped */
-    int rc = af_pcm_convert(d, c, src);
+    /* Already in the decoded layout: read in place instead of copying (the copy was a second
+     * buffer the size of the input, about half the peak memory of a 16 kHz load). */
+    const int fmt = native_fmt(c);
+    if (fmt >= 0 && !d->probe && (uintptr_t)src % elem_size[fmt] == 0) {
+        int rc = check_size(d, (af_sample_fmt)fmt);
+        if (rc != AF_OK)
+            return rc;
+        d->fmt = (af_sample_fmt)fmt;
+        d->data = (void *)(uintptr_t)src; /* never written through: see af_decoded.borrowed */
+        d->borrowed = 1;
+        return AF_OK;
+    }
+    int rc = af_pcm_convert(d, c, src); /* AF_PROBED in probe mode, before any sample */
     if (rc != AF_OK)
         af_decoded_free(d);
     return rc;
 }
 
 int af_pcm_decode_raw(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
-    memset(out, 0, sizeof(*out));
-    out->limit = limit;
+    af_decoded_init(out, limit);
     out->channels = 1;
     out->sample_rate = AF_SAMPLE_RATE;
     out->layout[0] = AF_CH_FC;

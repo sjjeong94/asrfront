@@ -110,6 +110,32 @@ int af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, 
 /* Raw kaldi fbank without LFR/CMVN. out: (raw_frames, n_mels) float32. */
 int af_sensevoice_fbank_raw(af_sensevoice *h, const float *audio, size_t n_samples, float *out);
 
+/* Streaming af_sensevoice_fbank: audio is pushed in pieces of any size, and every LFR row is
+ * returned as soon as no later sample can change it. The rows of all pushes and the finish
+ * are, bit for bit, af_sensevoice_fbank of the concatenated audio (dither included: the RNG is
+ * seeded at creation and after each finish). Memory does not grow with the input. Not
+ * thread-safe. */
+typedef struct af_sensevoice_stream af_sensevoice_stream;
+
+int af_sensevoice_stream_create(const af_sensevoice_config *cfg, af_sensevoice_stream **out);
+void af_sensevoice_stream_destroy(af_sensevoice_stream *s);
+/* Drop the pushed audio and start a new utterance. */
+void af_sensevoice_stream_reset(af_sensevoice_stream *s);
+/* The configuration's frontend, for af_sensevoice_feat_dim() (not for computing). */
+const af_sensevoice *af_sensevoice_stream_frontend(const af_sensevoice_stream *s);
+
+/* Rows that pushing n_samples more samples returns (size its output). */
+size_t af_sensevoice_stream_push_rows(const af_sensevoice_stream *s, size_t n_samples);
+/* Append audio; out: (af_sensevoice_stream_push_rows(s, n_samples), feat_dim) float32, of
+ * which *n_rows rows (that count) are written. */
+int af_sensevoice_stream_push(af_sensevoice_stream *s, const float *audio, size_t n_samples,
+                              float *out, size_t *n_rows);
+/* Rows af_sensevoice_stream_finish returns. */
+size_t af_sensevoice_stream_finish_rows(const af_sensevoice_stream *s);
+/* End of the utterance: the remaining rows (their last frames repeat the final one, as in
+ * af_sensevoice_fbank), then a reset. out: (af_sensevoice_stream_finish_rows(s), feat_dim). */
+int af_sensevoice_stream_finish(af_sensevoice_stream *s, float *out, size_t *n_rows);
+
 /* ------------------------------------------------------------------------ */
 /* Gemma 4 audio log-mel (transformers Gemma4AudioFeatureExtractor)         */
 /* ------------------------------------------------------------------------ */
@@ -164,6 +190,27 @@ int af_load_memory_ex(const void *buf, size_t size, af_raw_mode raw, size_t max_
 /* Same for a file (UTF-8 path). `.pcm` / `.raw` extensions select AF_RAW_FORCE,
  * anything else AF_RAW_NEVER. */
 int af_load_file(const char *path_utf8, float **out, size_t *n_samples);
+/* af_load_file with af_load_memory_ex's max_samples and err. */
+int af_load_file_ex(const char *path_utf8, size_t max_samples, float **out, size_t *n_samples,
+                    char *err, size_t err_size);
+
+/* What af_load_memory would decode, found without decoding or allocating the samples. */
+typedef struct af_audio_info {
+    const char *container; /* "WAV", "Wave64", "AIFF", "CAF", "NIST SPHERE", "FLAC", "MP3" or
+                            * "raw PCM" (static string) */
+    int sample_rate;       /* of the file, Hz */
+    int channels;
+    size_t n_frames;  /* decoded frames at sample_rate */
+    size_t n_samples; /* af_load_memory's output length (16 kHz mono) */
+} af_audio_info;
+
+/* Parse an in-memory audio file as af_load_memory_ex would, without its samples: the result
+ * and errors are those of af_load_memory_ex(buf, size, raw, max_samples, ...) (AF_ETOOLONG
+ * included), except that ADPCM block headers are not checked and memory is not exhausted.
+ * Uncompressed and ADPCM formats take time independent of the length; FLAC and MP3 are
+ * decoded (through a small buffer, stopping past max_samples) to count their frames. */
+int af_probe_memory(const void *buf, size_t size, af_raw_mode raw, size_t max_samples,
+                    af_audio_info *info, char *err, size_t err_size);
 
 void af_audio_free(float *p);
 

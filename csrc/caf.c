@@ -105,8 +105,7 @@ int af_coreaudio_layout(const uint8_t *body, size_t size, int channels, uint32_t
 }
 
 int af_caf_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
-    memset(out, 0, sizeof(*out));
-    out->limit = limit;
+    af_decoded_init(out, limit);
     /* file header: 'caff', version 1, flags; then 'desc' must be the first chunk */
     if (size < 8 + 12 + 32 || memcmp(buf, "caff", 4) != 0 || buf[4] != 0 || buf[5] != 1 ||
         memcmp(buf + 8, "desc", 4) != 0)

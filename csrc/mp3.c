@@ -8,8 +8,7 @@
 #include "dr_mp3.h"
 
 int af_mp3_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out) {
-    memset(out, 0, sizeof(*out));
-    out->limit = limit;
+    af_decoded_init(out, limit);
     drmp3 mp3;
     if (!drmp3_init_memory(&mp3, buf, size, NULL))
         return AF_ECORRUPT;
@@ -22,6 +21,19 @@ int af_mp3_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
     out->sample_rate = (int)mp3.sampleRate;
     /* Frames past the caller's limit are an error: decoding one more than the limit tells. */
     const size_t lim = af_frame_limit(out), lim_cap = lim < SIZE_MAX ? lim + 1 : SIZE_MAX;
+    af_default_layout(ch, out->layout);
+    if (out->probe) { /* count the frames a load decodes, through a small buffer */
+        float scratch[4096];
+        size_t n = 0;
+        drmp3_uint64 got;
+        while (n <= lim && (got = drmp3_read_pcm_frames_f32(
+                                &mp3, sizeof scratch / sizeof *scratch / (size_t)ch, scratch)) > 0)
+            n += (size_t)got;
+        drmp3_uninit(&mp3);
+        out->fmt = AF_SFMT_F32;
+        out->n_frames = n;
+        return n > lim ? AF_ETOOLONG : n == 0 ? AF_ECORRUPT : AF_PROBED;
+    }
     size_t cap = 65536 < lim_cap ? 65536 : lim_cap, n = 0;
     float *pcm = malloc(cap * (size_t)ch * sizeof(float));
     while (pcm && n <= lim) {
@@ -48,7 +60,6 @@ int af_mp3_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out
     }
     out->fmt = AF_SFMT_F32;
     out->n_frames = n;
-    af_default_layout(ch, out->layout);
     out->data = pcm;
     drmp3_uninit(&mp3);
     if (!pcm)

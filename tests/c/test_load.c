@@ -618,6 +618,67 @@ static void test_file(void) {
     size_t n = 0;
     CHECK(af_load_file("/nonexistent/x.wav", &a, &n) == AF_EIO);
     CHECK(af_load_file(NULL, &a, &n) == AF_EINVAL);
+    CHECK(af_load_file_ex(NULL, 0, &a, &n, NULL, 0) == AF_EINVAL);
+
+    /* af_load_file_ex: limit and error description, as af_load_memory_ex */
+    buf_t w;
+    wav_head(&w, 1, 1, 16000, 16, 0);
+    put(&w, "data\x10\0\0\0", 8);
+    for (int i = 0; i < 16; i++)
+        put(&w, "\x11", 1); /* 8 frames */
+    char path[] = "test_load_file_ex.wav";
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (!f)
+        return;
+    fwrite(w.b, 1, w.n, f);
+    fclose(f);
+    char err[128] = "x";
+    CHECK(af_load_file_ex(path, 8, &a, &n, err, sizeof err) == AF_OK && n == 8 && !err[0]);
+    af_audio_free(a);
+    CHECK(af_load_file_ex(path, 7, &a, &n, err, sizeof err) == AF_ETOOLONG && !a && n == 0);
+    f = fopen(path, "wb");
+    if (f) {
+        fwrite("RIFF\0\0\0\0WAVEfmt \2\0\0\0", 1, 18, f); /* truncated fmt chunk */
+        fclose(f);
+        CHECK(af_load_file_ex(path, 0, &a, &n, err, sizeof err) == AF_ECORRUPT &&
+              strcmp(err, "WAV") == 0);
+    }
+    remove(path);
+}
+
+static void test_probe(void) {
+    af_audio_info info;
+    char err[128];
+    buf_t w;
+    wav_head(&w, 1, 2, 44100, 16, 0);
+    put(&w, "data\x00\x02\0\0", 8);
+    for (int i = 0; i < 512; i++)
+        put(&w, "\x11", 1); /* 128 stereo frames */
+    float *a = NULL;
+    size_t n = 0;
+    CHECK(af_load_memory(w.b, w.n, AF_RAW_NEVER, &a, &n) == AF_OK);
+    af_audio_free(a);
+    CHECK(af_probe_memory(w.b, w.n, AF_RAW_NEVER, 0, &info, err, sizeof err) == AF_OK);
+    CHECK(strcmp(info.container, "WAV") == 0 && info.sample_rate == 44100 && info.channels == 2 &&
+          info.n_frames == 128 && info.n_samples == n && !err[0]);
+    CHECK(af_probe_memory(w.b, w.n, AF_RAW_NEVER, n - 1, &info, NULL, 0) == AF_ETOOLONG &&
+          info.container == NULL && info.n_samples == 0);
+    CHECK(af_probe_memory(w.b, w.n, AF_RAW_NEVER, n, &info, NULL, 0) == AF_OK);
+
+    const uint8_t pcm[7] = {0};
+    CHECK(af_probe_memory(pcm, 7, AF_RAW_AUTO, 0, &info, NULL, 0) == AF_OK &&
+          strcmp(info.container, "raw PCM") == 0 && info.n_samples == 3);
+    CHECK(af_probe_memory(pcm, 7, AF_RAW_NEVER, 0, &info, err, sizeof err) == AF_EUNSUPPORTED &&
+          strcmp(err, "no known container header") == 0);
+    CHECK(af_probe_memory(NULL, 1, AF_RAW_AUTO, 0, &info, NULL, 0) == AF_EINVAL);
+    CHECK(af_probe_memory(pcm, 7, AF_RAW_AUTO, 0, NULL, NULL, 0) == AF_EINVAL);
+
+    /* a rate the resampler refuses: as af_load_memory, with the same description */
+    wav_head(&w, 1, 1, 500, 16, 0);
+    put(&w, "data\x04\0\0\0\0\0\0\0", 12);
+    CHECK(af_probe_memory(w.b, w.n, AF_RAW_NEVER, 0, &info, err, sizeof err) == AF_EUNSUPPORTED &&
+          strstr(err, "500 Hz") != NULL);
 }
 
 static void test_resampler_cache(void) {
@@ -723,6 +784,7 @@ int main(void) {
     test_adpcm();
     test_coreaudio_layouts();
     test_file();
+    test_probe();
     test_resampler_cache();
     test_resampler_limits();
     if (failures) {
