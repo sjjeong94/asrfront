@@ -198,6 +198,13 @@ def main() -> None:
     seeds["regress_flac_cuesheet_index.flac"] = bytes(flac)
     # CAF data chunk size INT64_MIN: size - 4 once overflowed int64 (UBSan)
     seeds["regress_caf_data_size_int64_min.caf"] = caf(pcm, data_size=-(1 << 63))
+    # MS ADPCM block predictor 7 (corrupt) and a 128 Hz sample rate: the load fails on the
+    # block header, the probe (which skips block headers) on the sample rate
+    ms = bytearray(wav(0x02, 1, 4, 15, ms_block(7, 20, 100, -100, [7, 8] * 8), MS_COEFS))
+    ms[24:28] = struct.pack("<I", 128)  # fmt sample rate
+    seeds["regress_ms_corrupt_block_bad_rate.wav"] = bytes(ms)
+    # 2-byte raw PCM (1 sample): the probe at n - 1 = 0 samples is unlimited, not AF_ETOOLONG
+    seeds["regress_raw_one_sample.pcm"] = b"cf"
     for name, data in seeds.items():
         (OUT / name).write_bytes(data)
     total = sum(f.stat().st_size for f in OUT.iterdir())

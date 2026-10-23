@@ -42,8 +42,9 @@ audio = asrfront.load(request_body)  # bytes / bytearray / memoryview / uint8 ar
 audio = asrfront.load("stream.pcm")  # raw s16le 16 kHz mono (.pcm / .raw, or headerless bytes)
 audio = asrfront.load(upload, max_duration=600)  # ValueError if longer than 10 min
 
-info = asrfront.info(upload)  # without decoding: AudioInfo(format='WAV', sample_rate=44100,
-                              #   channels=2, n_frames=..., n_samples=len(load(upload)))
+# without decoding: AudioInfo(format='WAV', sample_rate=44100,
+#   channels=2, n_frames=..., n_samples=len(load(upload)))
+info = asrfront.info(upload)
 info.duration  # seconds of the 16 kHz output
 ```
 
