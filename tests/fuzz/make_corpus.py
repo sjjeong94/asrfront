@@ -69,6 +69,16 @@ def encode(name: str, codec: str, sr: int, ch: int, n: int, *extra: str) -> None
     subprocess.run(cmd, input=x.tobytes(), check=True)
 
 
+def crc8(data: bytes) -> int:
+    """FLAC frame header CRC-8 (polynomial x^8 + x^2 + x + 1, initial value 0)."""
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     for f in OUT.iterdir():
@@ -196,6 +206,24 @@ def main() -> None:
     flac[4] &= 0x7F
     flac[42:42] = bytes([last | 5]) + len(cue).to_bytes(3, "big") + cue
     seeds["regress_flac_cuesheet_index.flac"] = bytes(flac)
+    # A frame that fails to decode (stereo assignment in a mono stream, valid header CRC-8),
+    # then a good one: dr_flac resyncs past the failure on the next read, so a load (reading
+    # exactly the header's total + 1 = 400 frames) and a probe (4096 at a time) once counted
+    # 400 and 800 frames
+    flac = bytearray((OUT / "s16.flac").read_bytes())
+    pos = 4
+    while not flac[pos] & 0x80:  # metadata blocks up to the last one
+        pos += 4 + int.from_bytes(flac[pos + 1 : pos + 4], "big")
+    pos += 4 + int.from_bytes(flac[pos + 1 : pos + 4], "big")
+    frame = bytes(flac[pos:])
+    # sync, 16 kHz, mono s16, frame 0, 16-bit block size 400: the CRC-8 is header byte 7
+    assert frame[:7] == bytes.fromhex("fff8750800018f") and frame[7] == crc8(frame[:7])
+    bad = bytearray(frame)
+    bad[3] = 0x10 | (bad[3] & 0x0F)  # channel assignment 1: left/right
+    bad[7] = crc8(bad[:7])
+    flac[21] &= 0xF0  # STREAMINFO total samples: 399 (one frame of 400)
+    flac[22:26] = (399).to_bytes(4, "big")
+    seeds["regress_flac_resync_after_bad_frame.flac"] = bytes(flac + bad + frame)
     # CAF data chunk size INT64_MIN: size - 4 once overflowed int64 (UBSan)
     seeds["regress_caf_data_size_int64_min.caf"] = caf(pcm, data_size=-(1 << 63))
     # MS ADPCM block predictor 7 (corrupt) and a 128 Hz sample rate: the load fails on the

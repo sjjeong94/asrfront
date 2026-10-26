@@ -67,15 +67,22 @@ int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
     const size_t lim = af_frame_limit(out), lim_cap = lim < SIZE_MAX ? lim + 1 : SIZE_MAX;
     if (!mask || af_mask_layout(mask, ch, out->layout) != AF_OK)
         memcpy(out->layout, flac_layouts[ch - 1], (size_t)ch * sizeof(uint32_t));
+    /* Both loops below stop at the first short read. dr_flac returns what it has when a frame
+     * header or frame fails to decode, but the failure is not sticky: another call resyncs on
+     * the next sync code (in corrupt data, often a false one) and decodes on. Reading on after
+     * a short read would make the frame count depend on the read sizes, which differ between
+     * load and probe. */
     if (out->probe) {
         /* The header's total is only a hint (0, or more than a truncated file holds): count
          * the frames a load decodes, through a small buffer. */
         int32_t scratch[4096];
+        const size_t want = sizeof scratch / sizeof *scratch / (size_t)ch;
         size_t n = 0;
         drflac_uint64 got;
-        while (n <= lim && (got = drflac_read_pcm_frames_s32(
-                                f, sizeof scratch / sizeof *scratch / (size_t)ch, scratch)) > 0)
+        do {
+            got = drflac_read_pcm_frames_s32(f, want, scratch);
             n += (size_t)got;
+        } while (n <= lim && got == want);
         drflac_close(f);
         out->n_frames = n;
         out->fmt = bps <= 16 ? AF_SFMT_S16 : AF_SFMT_S32;
@@ -107,10 +114,11 @@ int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
             pcm = p;
             cap = ncap;
         }
-        drflac_uint64 got = drflac_read_pcm_frames_s32(f, cap - n, pcm + n * (size_t)ch);
-        if (got == 0)
-            break;
+        const size_t want = cap - n;
+        drflac_uint64 got = drflac_read_pcm_frames_s32(f, want, pcm + n * (size_t)ch);
         n += (size_t)got;
+        if (got < want)
+            break;
     }
     out->n_frames = n;
     drflac_close(f);
