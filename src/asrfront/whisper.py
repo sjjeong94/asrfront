@@ -45,10 +45,12 @@ def _check_length(audio: np.ndarray, pad_or_trim: bool, name: str = "audio") -> 
         )
 
 
-def _frontend(n_mels: int, pad_or_trim: bool) -> _ext.WhisperFrontend:
+def _frontend(n_mels: int, pad_or_trim: bool, channel_last: bool = False) -> _ext.WhisperFrontend:
     return cached_frontend(
-        ("whisper", n_mels, pad_or_trim),
-        lambda: _ext.WhisperFrontend(n_mels=n_mels, pad_or_trim=pad_or_trim),
+        ("whisper", n_mels, pad_or_trim, channel_last),
+        lambda: _ext.WhisperFrontend(
+            n_mels=n_mels, pad_or_trim=pad_or_trim, channel_last=channel_last
+        ),
     )
 
 
@@ -65,7 +67,8 @@ def log_mel(
             torch tensor.
         n_mels: 80, or 128 for large-v3.
         pad_or_trim: pad/trim the input to 30 s (3000 frames) like ``whisper.pad_or_trim``.
-        channel_last: return ``(n_frames, n_mels)`` (time first, C-contiguous) instead.
+        channel_last: return ``(n_frames, n_mels)`` (time first, C-contiguous) instead,
+            written in that layout by the native code.
 
     Returns:
         float32 array of shape ``(n_mels, n_frames)``, or ``(n_frames, n_mels)`` with
@@ -86,8 +89,7 @@ def log_mel(
         audio = audio[:N_SAMPLES]
     audio = convert_audio(audio)
     _check_length(audio, pad_or_trim)
-    mel = _frontend(n_mels, pad_or_trim).log_mel(audio)
-    return np.ascontiguousarray(mel.T) if channel_last else mel
+    return _frontend(n_mels, pad_or_trim, bool(channel_last)).log_mel(audio)
 
 
 def log_mel_batch(

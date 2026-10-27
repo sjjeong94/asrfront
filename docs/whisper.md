@@ -206,7 +206,8 @@ All steps above run in one pass over the frames in `csrc/whisper.c`, 8 frames at
    Twiddle factors are computed in double and stored as float.
 3. **Mel** — sparse filter ranges, accumulated per lane.
 4. **log10** — a vectorized Cephes `logf` polynomial (≈ 1 ulp) times `log10(e)`, with the
-   1e-10 floor; values are written transposed into the `(n_mels, T)` output.
+   1e-10 floor; values are written transposed into the `(n_mels, T)` output, or frame by
+   frame into a `(T, n_mels)` one (`channel_last`).
 5. **Max** — the running global max is updated from each block while it is still in cache
    (max is order-independent, so this equals one pass over the output).
 6. **Normalize** — one pass applies `(max(x, max − 8) + 4) / 4` in place over the computed

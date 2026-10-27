@@ -34,10 +34,11 @@ __all__ = [
 _MIN_SAMPLES = N_FFT // 2 + 1  # the centered STFT's reflect padding needs more than 200
 
 
-def _frontend() -> _ext.WhisperFrontend:
+def _frontend(channel_last: bool = False) -> _ext.WhisperFrontend:
     return cached_frontend(
-        ("whisper", N_MELS, False),  # the same handle as whisper.log_mel(n_mels=128, ...)
-        lambda: _ext.WhisperFrontend(n_mels=N_MELS, pad_or_trim=False),
+        # the same handle as whisper.log_mel(n_mels=128, pad_or_trim=False, ...)
+        ("whisper", N_MELS, False, channel_last),
+        lambda: _ext.WhisperFrontend(n_mels=N_MELS, pad_or_trim=False, channel_last=channel_last),
     )
 
 
@@ -55,7 +56,8 @@ def log_mel(audio: Any, channel_last: bool = False) -> np.ndarray:
     Args:
         audio: 16 kHz mono waveform: float array in [-1, 1], int16 PCM, list, or CPU
             torch tensor.
-        channel_last: return ``(len(audio) // 160, 128)`` (time first, C-contiguous) instead.
+        channel_last: return ``(len(audio) // 160, 128)`` (time first, C-contiguous) instead,
+            written in that layout by the native code.
 
     Returns:
         float32 array of shape ``(128, len(audio) // 160)``, or its transpose with
@@ -67,8 +69,7 @@ def log_mel(audio: Any, channel_last: bool = False) -> np.ndarray:
     """
     audio = as_audio(audio)
     _check_length(audio.shape[0], "audio")
-    mel = _frontend().log_mel(audio)
-    return np.ascontiguousarray(mel.T) if channel_last else mel
+    return _frontend(bool(channel_last)).log_mel(audio)
 
 
 def _check_out(out: Any, shape: tuple[int, int, int]) -> np.ndarray:

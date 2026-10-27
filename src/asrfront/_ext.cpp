@@ -172,29 +172,36 @@ static nb::object compute_into(size_t rows, size_t cols, OutArg &out, F &&fn) {
 struct Whisper {
     af_whisper *h = nullptr;
     int n_mels;
+    bool channel_last;
     std::atomic<bool> busy{false};
 
-    Whisper(int n_mels_, bool pad_or_trim) : n_mels(n_mels_) {
+    Whisper(int n_mels_, bool pad_or_trim, bool channel_last_)
+        : n_mels(n_mels_), channel_last(channel_last_) {
         af_whisper_config cfg;
         af_whisper_default_config(&cfg);
         cfg.n_mels = n_mels_;
         cfg.pad_or_trim = pad_or_trim;
+        cfg.channel_last = channel_last_;
         check(af_whisper_create(&cfg, &h));
     }
     ~Whisper() { af_whisper_destroy(h); }
     Whisper(const Whisper &) = delete;
     Whisper &operator=(const Whisper &) = delete;
 
+    // Output rows and columns for `frames` frames: (n_mels, frames), or the transpose.
+    size_t rows(size_t frames) const { return channel_last ? frames : (size_t)n_mels; }
+    size_t cols(size_t frames) const { return channel_last ? (size_t)n_mels : frames; }
+
     nb::object log_mel(Audio audio, OutRows out) {
         Busy guard(busy);
         size_t n = audio.shape(0);
         size_t frames = af_whisper_out_frames(h, n);
         if (!out)
-            return nb::cast(compute_2d((size_t)n_mels, frames, [&](float *o) {
+            return nb::cast(compute_2d(rows(frames), cols(frames), [&](float *o) {
                 return af_whisper_log_mel(h, audio.data(), n, o);
             }));
-        check_shape(*out, (size_t)n_mels, frames);
-        const size_t ld = row_stride(*out, frames);
+        check_shape(*out, rows(frames), cols(frames));
+        const size_t ld = row_stride(*out, cols(frames));
         int rc;
         {
             nb::gil_scoped_release release;
@@ -210,8 +217,8 @@ struct Whisper {
         std::vector<size_t> ld(outs.size());
         for (size_t i = 0; i < outs.size(); i++) {
             const size_t frames = af_whisper_out_frames(h, audios[i].shape(0));
-            check_shape(outs[i], (size_t)n_mels, frames);
-            ld[i] = row_stride(outs[i], frames);
+            check_shape(outs[i], rows(frames), cols(frames));
+            ld[i] = row_stride(outs[i], cols(frames));
         }
         return run_many(audios, [&](size_t i) {
             return af_whisper_log_mel_ld(h, audios[i].data(), audios[i].shape(0), outs[i].data(),
@@ -222,7 +229,7 @@ struct Whisper {
     nb::object log_mel_padded(Audio audio, size_t n_padded, OutArg out) {
         Busy guard(busy);
         size_t n = audio.shape(0);
-        return compute_into((size_t)n_mels, n_padded / 160, out, [&](float *o) {
+        return compute_into(rows(n_padded / 160), cols(n_padded / 160), out, [&](float *o) {
             return af_whisper_log_mel_padded(h, audio.data(), n, n_padded, o);
         });
     }
@@ -232,7 +239,7 @@ struct Whisper {
         Busy guard(busy);
         check_count(audios.size(), outs.size());
         for (const OutC &o : outs)
-            check_shape(o, (size_t)n_mels, n_padded / 160);
+            check_shape(o, rows(n_padded / 160), cols(n_padded / 160));
         return run_many(audios, [&](size_t i) {
             return af_whisper_log_mel_padded(h, audios[i].data(), audios[i].shape(0), n_padded,
                                              outs[i].data());
@@ -530,19 +537,22 @@ NB_MODULE(_ext, m) {
         "sr_in"_a, "sr_out"_a = AF_SAMPLE_RATE, "(phases + 1, N) float64 filter bank (testing).");
 
     nb::class_<Whisper>(m, "WhisperFrontend")
-        .def(nb::init<int, bool>(), "n_mels"_a = 80, "pad_or_trim"_a = true)
+        .def(nb::init<int, bool, bool>(), "n_mels"_a = 80, "pad_or_trim"_a = true,
+             "channel_last"_a = false)
         .def_ro("n_mels", &Whisper::n_mels)
+        .def_ro("channel_last", &Whisper::channel_last)
         .def(
             "out_frames", [](const Whisper &w, size_t n) { return af_whisper_out_frames(w.h, n); },
             "n_samples"_a)
         .def("log_mel", &Whisper::log_mel, "audio"_a,
              nb::arg("out").none().noconvert() = nb::none(),
-             "Log-mel spectrogram (n_mels, out_frames). With `out` (float32, contiguous rows, "
-             "e.g. a[:, :n] of a C-contiguous array), writes into it and returns None.")
+             "Log-mel spectrogram (n_mels, out_frames), or (out_frames, n_mels) with "
+             "channel_last. With `out` (float32, contiguous rows, e.g. a[:, :n] of a "
+             "C-contiguous array), writes into it and returns None.")
         .def("log_mel_padded", &Whisper::log_mel_padded, "audio"_a, "n_padded"_a,
              nb::arg("out").none().noconvert() = nb::none(),
              "Log-mel spectrogram of `audio` followed by zeros up to `n_padded` samples, "
-             "(n_mels, n_padded // 160). Needs pad_or_trim=False.")
+             "(n_mels, n_padded // 160) or its transpose. Needs pad_or_trim=False.")
         .def("log_mel_many", &Whisper::log_mel_many, nb::arg("audios").noconvert(),
              nb::arg("outs").noconvert(),
              "log_mel(audios[i], out=outs[i]) for every i with one GIL release (batch chunks). "

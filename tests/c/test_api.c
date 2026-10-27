@@ -189,6 +189,69 @@ static void test_whisper_ld(void) {
     free(audio);
 }
 
+/* channel_last: exactly the transpose of the default layout, for the plain and the
+ * silence-skipping normalization, rows spaced apart (_ld, gap untouched) and _padded. */
+static void test_whisper_channel_last(void) {
+    static const size_t lens[] = {201, 16123, 479959, 480000, 500000};
+    const size_t gap = 3;
+    float *audio = malloc(500000 * sizeof(float));
+    float *a = malloc(128 * 3125 * sizeof(float)), *b = malloc(3125 * (128 + gap) * sizeof(float));
+    for (size_t i = 0; i < 500000; i++)
+        audio[i] =
+            0.3f * sinf(0.013f * (float)i) + 0.01f * (float)((int)(i * 7919 % 1000) - 500) / 500.0f;
+    for (int n_mels = 80; n_mels <= 128; n_mels += 48) {
+        for (int pad = 0; pad < 2; pad++) {
+            af_whisper_config cfg;
+            af_whisper *cf = NULL, *cl = NULL;
+            af_whisper_default_config(&cfg);
+            CHECK(cfg.channel_last == 0);
+            cfg.n_mels = n_mels;
+            cfg.pad_or_trim = pad;
+            CHECK(af_whisper_create(&cfg, &cf) == AF_OK);
+            cfg.channel_last = 1;
+            CHECK(af_whisper_create(&cfg, &cl) == AF_OK);
+            for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+                const size_t n = lens[i], frames = af_whisper_out_frames(cf, n),
+                             ld = (size_t)n_mels + gap;
+                CHECK(af_whisper_log_mel(cf, audio, n, a) == AF_OK);
+                CHECK(af_whisper_log_mel(cl, audio, n, b) == AF_OK);
+                int same = 1;
+                for (size_t t = 0; t < frames; t++)
+                    for (int m = 0; m < n_mels; m++)
+                        same &= memcmp(&a[(size_t)m * frames + t], &b[t * n_mels + m], 4) == 0;
+                CHECK(same);
+                for (size_t j = 0; j < frames * ld; j++)
+                    b[j] = 7.0f;
+                CHECK(af_whisper_log_mel_ld(cl, audio, n, b, ld) == AF_OK);
+                same = 1;
+                for (size_t t = 0; t < frames; t++) {
+                    for (int m = 0; m < n_mels; m++)
+                        same &= memcmp(&a[(size_t)m * frames + t], &b[t * ld + m], 4) == 0;
+                    for (size_t m = (size_t)n_mels; m < ld; m++)
+                        same &= b[t * ld + m] == 7.0f;
+                }
+                CHECK(same);
+                CHECK(af_whisper_log_mel_ld(cl, audio, n, b, (size_t)n_mels - 1) == AF_EINVAL);
+            }
+            if (!pad) { /* a short item of a padded batch skips silent frames too */
+                const size_t n = 1000, n_padded = 500000, frames = n_padded / 160;
+                CHECK(af_whisper_log_mel_padded(cf, audio, n, n_padded, a) == AF_OK);
+                CHECK(af_whisper_log_mel_padded(cl, audio, n, n_padded, b) == AF_OK);
+                int same = 1;
+                for (size_t t = 0; t < frames; t++)
+                    for (int m = 0; m < n_mels; m++)
+                        same &= memcmp(&a[(size_t)m * frames + t], &b[t * n_mels + m], 4) == 0;
+                CHECK(same);
+            }
+            af_whisper_destroy(cf);
+            af_whisper_destroy(cl);
+        }
+    }
+    free(audio);
+    free(a);
+    free(b);
+}
+
 static void test_gemma4(void) {
     CHECK(af_gemma4_out_frames(0) == 0 && af_gemma4_out_frames(160) == 0);
     CHECK(af_gemma4_out_frames(161) == 1 && af_gemma4_out_frames(16000) == 99);
@@ -316,6 +379,7 @@ int main(void) {
     test_whisper_silence_skip();
     test_whisper_padded();
     test_whisper_ld();
+    test_whisper_channel_last();
     test_sensevoice();
     test_sensevoice_stream();
     test_gemma4();

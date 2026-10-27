@@ -48,9 +48,10 @@ const char *af_kernel_isa(void);
 typedef struct af_whisper af_whisper;
 
 typedef struct af_whisper_config {
-    int n_mels;      /* 80 | 128 */
-    int pad_or_trim; /* nonzero: pad/trim input to 30 s -> 3000 frames */
-    int n_threads;   /* reserved, must be >= 0; currently unused (the core is single-threaded) */
+    int n_mels;       /* 80 | 128 */
+    int pad_or_trim;  /* nonzero: pad/trim input to 30 s -> 3000 frames */
+    int n_threads;    /* reserved, must be >= 0; currently unused (the core is single-threaded) */
+    int channel_last; /* nonzero: outputs are (out_frames, n_mels) instead of (n_mels, ...) */
 } af_whisper_config;
 
 void af_whisper_default_config(af_whisper_config *cfg);
@@ -60,18 +61,19 @@ void af_whisper_destroy(af_whisper *h);
 /* Number of output frames for an input of n_samples. */
 size_t af_whisper_out_frames(const af_whisper *h, size_t n_samples);
 
-/* out: (n_mels, out_frames) float32, row-major. */
+/* out: (n_mels, out_frames) float32, row-major; (out_frames, n_mels) with channel_last. */
 int af_whisper_log_mel(af_whisper *h, const float *audio, size_t n_samples, float *out);
 
 /* The same with mel row m at out + m * ld (ld >= out_frames; elements after a row's
- * out_frames are not touched), e.g. into a zero-padded batch (n_mels, T >= out_frames). */
+ * out_frames are not touched), e.g. into a zero-padded batch (n_mels, T >= out_frames).
+ * With channel_last, frame t is at out + t * ld (ld >= n_mels). */
 int af_whisper_log_mel_ld(af_whisper *h, const float *audio, size_t n_samples, float *out,
                           size_t ld);
 
 /* The same over the input followed by zeros up to n_padded samples, as when it is padded to
  * the longest item of a batch before the STFT (transformers' WhisperFeatureExtractor with
  * padding=True, used by Qwen3-ASR). Handles with pad_or_trim = 0 only; n_samples <= n_padded
- * and n_padded > 200. out: (n_mels, n_padded / 160). */
+ * and n_padded > 200. out: (n_mels, n_padded / 160), or its transpose with channel_last. */
 int af_whisper_log_mel_padded(af_whisper *h, const float *audio, size_t n_samples, size_t n_padded,
                               float *out);
 
