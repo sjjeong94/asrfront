@@ -90,3 +90,11 @@ const af_kernels *af_kernels_select(void) {
 #endif
     return &af_kernels_generic;
 }
+
+int af_all_finite(const float *x, size_t n) {
+#ifdef AF_HAVE_AVX2
+    if (avx2_available())
+        return af_kernels_avx2.all_finite(x, n);
+#endif
+    return af_kernels_generic.all_finite(x, n);
+}

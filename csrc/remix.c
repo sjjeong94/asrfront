@@ -75,9 +75,12 @@ void af_downmix_weights(const uint32_t *layout, int channels, double *w) {
             w[c] /= sum;
 }
 
-/* floor(v / 2^bits) without relying on the implementation-defined >> of negatives */
+/* floor(v / 2^bits) for |v| < 2^62, without relying on the implementation-defined >> of
+ * negatives and without a branch (the sign of audio samples is unpredictable): shift v + 2^62,
+ * which is non-negative, and take 2^62 / 2^bits back off. */
 static int64_t floor_shift(int64_t v, int bits) {
-    return v >= 0 ? v >> bits : -((-v + ((int64_t)1 << bits) - 1) >> bits);
+    const uint64_t bias = (uint64_t)1 << 62;
+    return (int64_t)(((uint64_t)v + bias) >> bits) - (int64_t)(bias >> bits);
 }
 
 static int16_t wrap16(int64_t v) {

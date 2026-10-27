@@ -72,11 +72,20 @@ typedef struct af_kernels {
     void (*log_add)(float *x, size_t n, float add);
     /* In place: x = sqrt(x) over n floats (magnitude from power). */
     void (*sqrt_f32)(float *x, size_t n);
+
+    /* SoA lanes -> output rows: out[l * ld + i] = soa[i * AF_VL + l] for i < n, l < count
+     * (count <= AF_VL, ld >= n). A plain copy, so every variant writes the same bits. */
+    void (*soa_to_rows)(const float *soa, int n, int count, float *out, size_t ld);
+    /* Whether no float of x[0..n) is NaN or inf (exponent bits all set). */
+    int (*all_finite)(const float *x, size_t n);
 } af_kernels;
 
 /* Best table for this CPU. ASRFRONT_KERNELS=generic forces the baseline build,
  * ASRFRONT_KERNELS=scalar the plain-C build without vector extensions (the code path
  * MSVC compiles; used to test it on every platform). */
 const af_kernels *af_kernels_select(void);
+
+/* all_finite() of the best kernels for this CPU (for the Python binding's input checks). */
+int af_all_finite(const float *x, size_t n);
 
 #endif /* ASRFRONT_KERNELS_H */

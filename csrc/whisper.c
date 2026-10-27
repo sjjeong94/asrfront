@@ -169,11 +169,7 @@ static void log_mel_virtual(af_whisper *h, const float *audio, size_t n_in, size
         /* Unused lanes hold copies of lane 0, so they do not change the max. */
         gmax = k->max_f32(h->melv, (size_t)n_mels * AF_VL, gmax);
         if (channel_last) { /* SoA lane l is output frame t0 + l */
-            for (int l = 0; l < count; l++) {
-                float *dst = out + (t0 + (size_t)l) * ld;
-                for (int m = 0; m < n_mels; m++)
-                    dst[m] = h->melv[(size_t)m * AF_VL + l];
-            }
+            k->soa_to_rows(h->melv, n_mels, count, out + t0 * ld, ld);
             continue;
         }
         for (int m = 0; m < n_mels; m++) { /* SoA rows map to contiguous output runs */

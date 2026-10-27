@@ -5,6 +5,9 @@
 #include <string.h>
 
 #include "asrfront.h"
+#include "kernels.h"
+
+extern const af_kernels af_kernels_generic, af_kernels_scalar;
 
 static int failures = 0;
 
@@ -284,6 +287,82 @@ static void test_gemma4(void) {
     free(out);
 }
 
+/* af_gemma4_log_mel_channel_first: exactly the transpose of af_gemma4_log_mel, padding frames
+ * (zeros) included. */
+static void test_gemma4_channel_first(void) {
+    static const size_t lens[] = {0, 160, 161, 1000, 16000, 16123};
+    float *audio = malloc(16123 * sizeof(float));
+    float *a = malloc(128 * 110 * sizeof(float)), *b = malloc(128 * 110 * sizeof(float));
+    for (size_t i = 0; i < 16123; i++)
+        audio[i] = 0.3f * sinf(0.017f * (float)i);
+    af_gemma4 *h = NULL;
+    CHECK(af_gemma4_create(&h) == AF_OK);
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        const size_t n = lens[i];
+        const size_t frames = af_gemma4_out_frames((n + 127) / 128 * 128) + 3; /* + zero frames */
+        for (size_t j = 0; j < 128 * frames; j++)
+            b[j] = 7.0f;
+        CHECK(af_gemma4_log_mel(h, audio, n, frames, a) == AF_OK);
+        CHECK(af_gemma4_log_mel_channel_first(h, audio, n, frames, b) == AF_OK);
+        int same = 1;
+        for (size_t t = 0; t < frames; t++)
+            for (size_t m = 0; m < 128; m++)
+                same &= memcmp(&a[t * 128 + m], &b[m * frames + t], 4) == 0;
+        CHECK(same);
+    }
+    CHECK(af_gemma4_log_mel_channel_first(NULL, audio, 10, 1, b) == AF_EINVAL);
+    af_gemma4_destroy(h);
+    free(audio);
+    free(a);
+    free(b);
+}
+
+/* soa_to_rows and all_finite: every kernel table gives the plain loop's result. */
+static void test_kernels_extra(void) {
+    const af_kernels *tables[] = {&af_kernels_scalar, &af_kernels_generic, af_kernels_select()};
+    float soa[131 * AF_VL], out[AF_VL * 140];
+    for (int i = 0; i < 131 * AF_VL; i++)
+        soa[i] = (float)i + 0.5f;
+    float *x = malloc(5000 * sizeof(float));
+    for (size_t k = 0; k < sizeof(tables) / sizeof(tables[0]); k++) {
+        const af_kernels *t = tables[k];
+        static const int ns[] = {1, 7, 8, 23, 80, 128, 131};
+        for (size_t j = 0; j < sizeof(ns) / sizeof(ns[0]); j++)
+            for (int count = 1; count <= AF_VL; count++) {
+                const int n = ns[j];
+                const size_t ld = (size_t)n + 9;
+                for (size_t i = 0; i < sizeof(out) / sizeof(out[0]); i++)
+                    out[i] = -1.0f;
+                t->soa_to_rows(soa, n, count, out, ld);
+                int ok = 1;
+                for (int l = 0; l < AF_VL; l++)
+                    for (size_t i = 0; i < ld && l * ld + i < sizeof(out) / sizeof(out[0]); i++) {
+                        const float want = l < count && i < (size_t)n
+                                               ? soa[i * AF_VL + (size_t)l]
+                                               : -1.0f; /* outside the rows: untouched */
+                        ok &= out[(size_t)l * ld + i] == want;
+                    }
+                CHECK(ok);
+            }
+        for (size_t i = 0; i < 5000; i++)
+            x[i] = (float)i * 1e30f; /* large but finite */
+        CHECK(t->all_finite(x, 5000) && t->all_finite(x, 0));
+        static const size_t at[] = {0, 7, 1023, 1024, 1025, 4095, 4999};
+        const float bad[] = {NAN, INFINITY, -INFINITY};
+        for (size_t i = 0; i < sizeof(at) / sizeof(at[0]); i++)
+            for (int v = 0; v < 3; v++) {
+                const float keep = x[at[i]];
+                x[at[i]] = bad[v];
+                CHECK(!t->all_finite(x, 5000));
+                CHECK(t->all_finite(x, at[i])); /* stops just before it */
+                x[at[i]] = keep;
+            }
+    }
+    x[4999] = NAN;
+    CHECK(!af_all_finite(x, 5000) && af_all_finite(x, 4999));
+    free(x);
+}
+
 static void test_misc(void) {
     CHECK(strcmp(af_version(), ASRFRONT_VERSION) == 0);
     CHECK(strcmp(af_strerror(AF_EINVAL), "invalid argument") == 0);
@@ -383,6 +462,8 @@ int main(void) {
     test_sensevoice();
     test_sensevoice_stream();
     test_gemma4();
+    test_gemma4_channel_first();
+    test_kernels_extra();
     test_misc();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);

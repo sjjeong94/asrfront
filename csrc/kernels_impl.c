@@ -652,8 +652,52 @@ static void resample_run(const float *bank, int width, const float *x, int m, in
     }
 }
 
+/* ---------------------------------------------------------------------------------- */
+/* Output transposes and input checks                                                 */
+/* ---------------------------------------------------------------------------------- */
+
+#if defined(AF_VEC_EXT) && W == 8 && VL == 8
+static void soa_to_rows(const float *soa, int n, int count, float *out, size_t ld) {
+    int i0 = 0;
+    for (; i0 + 8 <= n; i0 += 8) { /* 8 x 8 tiles: c[l] is lane l's elements i0 .. i0 + 7 */
+        vn r[8], c[8];
+        for (int j = 0; j < 8; j++)
+            r[j] = vld(soa + (size_t)(i0 + j) * VL);
+        transpose8(r, c);
+        for (int l = 0; l < count; l++)
+            vst(out + (size_t)l * ld + (size_t)i0, c[l]);
+    }
+    for (int l = 0; l < count; l++)
+        for (int i = i0; i < n; i++)
+            out[(size_t)l * ld + (size_t)i] = soa[(size_t)i * VL + (size_t)l];
+}
+#else
+static void soa_to_rows(const float *soa, int n, int count, float *out, size_t ld) {
+    for (int l = 0; l < count; l++)
+        for (int i = 0; i < n; i++)
+            out[(size_t)l * ld + (size_t)i] = soa[(size_t)i * VL + (size_t)l];
+}
+#endif
+
+/* Blocks of a fixed size so that the inner loop vectorizes; a block with a NaN / inf ends the
+ * scan. */
+static int all_finite(const float *x, size_t n) {
+    for (size_t i0 = 0; i0 < n; i0 += 1024) {
+        const size_t len = n - i0 < 1024 ? n - i0 : 1024;
+        uint32_t bad = 0;
+        for (size_t i = 0; i < len; i++) {
+            uint32_t u;
+            memcpy(&u, x + i0 + i, sizeof(u));
+            bad |= (u & 0x7F800000u) == 0x7F800000u;
+        }
+        if (bad)
+            return 0;
+    }
+    return 1;
+}
+
 const af_kernels AF_CAT(af_kernels, AF_ISA) = {
-    AF_STR(AF_ISA), rfft_power,   gather_packed, gather_scaled, mel,
-    log10_floor,    log_floor,    kaldi_prep,    max_f32,       whisper_normalize,
-    resample_dot,   resample_run, log_add,       sqrt_f32,
+    AF_STR(AF_ISA), rfft_power, gather_packed, gather_scaled,     mel,          log10_floor,
+    log_floor,      kaldi_prep, max_f32,       whisper_normalize, resample_dot, resample_run,
+    log_add,        sqrt_f32,   soa_to_rows,   all_finite,
 };

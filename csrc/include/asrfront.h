@@ -160,6 +160,9 @@ size_t af_gemma4_valid_frames(size_t n_samples);
  * then zeros, as transformers masks the padding's frames. */
 int af_gemma4_log_mel(af_gemma4 *h, const float *audio, size_t n_samples, size_t n_frames,
                       float *out);
+/* The same transposed: out (128, n_frames). */
+int af_gemma4_log_mel_channel_first(af_gemma4 *h, const float *audio, size_t n_samples,
+                                    size_t n_frames, float *out);
 
 /* ------------------------------------------------------------------------ */
 /* Audio loading (16 kHz mono float32, as whisper's ffmpeg-based load_audio) */

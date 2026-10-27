@@ -184,9 +184,7 @@ static void fbank_block(af_sensevoice *h, const float *audio, size_t t0, int cou
     k->rfft_power(h->fft, h->re, h->im, h->scr_re, h->scr_im, h->power);
     k->mel(h->mel, h->power, h->melv);
     k->log_floor(h->melv, (size_t)n_mels * AF_VL, FLT_EPSILON);
-    for (int l = 0; l < count; l++)
-        for (int m = 0; m < n_mels; m++)
-            out[(size_t)l * n_mels + m] = h->melv[(size_t)m * AF_VL + l];
+    k->soa_to_rows(h->melv, n_mels, count, out, (size_t)n_mels);
 }
 
 static void fbank_raw(af_sensevoice *h, const float *audio, size_t n_frames, float *out) {

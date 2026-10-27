@@ -78,7 +78,8 @@ def log_mel(audio: Any, truncation: bool = True, channel_last: bool = True) -> n
             torch tensor.
         truncation: use only the first 30 s, as transformers does by default (samples past it
             are neither converted nor checked). ``False`` computes the whole input.
-        channel_last: ``False`` returns ``(128, T)`` (mel first, C-contiguous) instead.
+        channel_last: ``False`` returns ``(128, T)`` (mel first, C-contiguous) instead,
+            written in that layout by the native code.
 
     Returns:
         float32 array ``(T, 128)`` (``(128, T)`` without ``channel_last``), time first like
@@ -95,8 +96,7 @@ def log_mel(audio: Any, truncation: bool = True, channel_last: bool = True) -> n
     if truncation:
         audio = audio[:MAX_SAMPLES]
     audio = convert_audio(audio)
-    mel = _frontend().log_mel(audio, _out_frames(audio.shape[0]))
-    return mel if channel_last else np.ascontiguousarray(mel.T)
+    return _frontend().log_mel(audio, _out_frames(audio.shape[0]), channel_last=bool(channel_last))
 
 
 def log_mel_batch(

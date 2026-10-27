@@ -57,7 +57,8 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
 
 - Frames are processed **8 at a time in a structure-of-arrays layout** (`buf[i * 8 + lane]`): FFT
   passes, the fused real-FFT split + power, mel, log and kaldi preprocessing all loop over lanes,
-  so they vectorize at any SIMD width. Frames are gathered with register transposes.
+  so they vectorize at any SIMD width. Frames are gathered with register transposes, and
+  time-first outputs are written back from the lanes with the same 8×8 transpose.
 - Kernels use GCC/Clang vector extensions at the native width (8 floats with AVX, 4 with SSE2 /
   NEON); other compilers (MSVC) get plain floats.
 - On aarch64, the float resampler uses two explicit 128-bit NEON FMA accumulators, retaining

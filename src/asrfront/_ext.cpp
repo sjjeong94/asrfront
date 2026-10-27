@@ -16,6 +16,7 @@
 
 #include "asrfront.h"
 extern "C" {
+#include "kernels.h"  // internal: af_all_finite
 #include "melbank.h"  // internal; exposed for tests only
 #include "resample.h" // internal; exposed for tests only
 }
@@ -94,20 +95,10 @@ static size_t row_stride(const Rows &out, size_t frames) {
     return (size_t)ld;
 }
 
-// Whether no sample is NaN or inf (exponent bits all set), in blocks that vectorize.
+// Whether no sample is NaN or inf. In the C core: this module is built with -Os (nanobind's
+// default), which keeps the loop from vectorizing.
 static bool all_finite(const float *x, size_t n) {
-    for (size_t i0 = 0; i0 < n; i0 += 1024) {
-        const size_t end = n - i0 < 1024 ? n : i0 + 1024;
-        unsigned bad = 0;
-        for (size_t i = i0; i < end; i++) {
-            uint32_t u;
-            std::memcpy(&u, x + i, sizeof u);
-            bad |= (u & 0x7F800000u) == 0x7F800000u;
-        }
-        if (bad)
-            return false;
-    }
-    return true;
+    return af_all_finite(x, n) != 0;
 }
 
 // The C handles are not thread-safe and the methods run without the GIL, so concurrent calls
@@ -366,9 +357,13 @@ struct Gemma4 {
     Gemma4(const Gemma4 &) = delete;
     Gemma4 &operator=(const Gemma4 &) = delete;
 
-    nb::object log_mel(Audio audio, size_t n_frames, OutArg out) {
+    nb::object log_mel(Audio audio, size_t n_frames, OutArg out, bool channel_last) {
         Busy guard(busy);
         size_t n = audio.shape(0);
+        if (!channel_last)
+            return compute_into(128, n_frames, out, [&](float *o) {
+                return af_gemma4_log_mel_channel_first(h, audio.data(), n, n_frames, o);
+            });
         return compute_into(n_frames, 128, out, [&](float *o) {
             return af_gemma4_log_mel(h, audio.data(), n, n_frames, o);
         });
@@ -412,13 +407,12 @@ NB_MODULE(_ext, m) {
         [](int n_mels) {
             af_melbank *mb = nullptr;
             check(af_melbank_slaney(AF_SAMPLE_RATE, 400, n_mels, 0.0, AF_SAMPLE_RATE / 2.0, &mb));
+            std::unique_ptr<af_melbank, void (*)(af_melbank *)> guard(mb, af_melbank_destroy);
             size_t rows = (size_t)af_melbank_n_mels(mb), cols = (size_t)af_melbank_n_bins(mb);
-            Out2D res = compute_2d(rows, cols, [&](float *out) {
+            return compute_2d(rows, cols, [&](float *out) {
                 af_melbank_to_dense(mb, out);
                 return AF_OK;
             });
-            af_melbank_destroy(mb);
-            return res;
         },
         "n_mels"_a, "Dense (n_mels, 201) slaney filters used by the whisper frontend (testing).");
 
@@ -427,13 +421,12 @@ NB_MODULE(_ext, m) {
         [](int n_mels) {
             af_melbank *mb = nullptr;
             check(af_melbank_kaldi(AF_SAMPLE_RATE, 512, n_mels, 20.0, 0.0, &mb));
+            std::unique_ptr<af_melbank, void (*)(af_melbank *)> guard(mb, af_melbank_destroy);
             size_t rows = (size_t)af_melbank_n_mels(mb), cols = (size_t)af_melbank_n_bins(mb);
-            Out2D res = compute_2d(rows, cols, [&](float *out) {
+            return compute_2d(rows, cols, [&](float *out) {
                 af_melbank_to_dense(mb, out);
                 return AF_OK;
             });
-            af_melbank_destroy(mb);
-            return res;
         },
         "n_mels"_a, "Dense (n_mels, 257) kaldi filters used by the sensevoice frontend (testing).");
 
@@ -569,9 +562,9 @@ NB_MODULE(_ext, m) {
         .def_static("valid_frames", &af_gemma4_valid_frames, "n_samples"_a,
                     "Frames that read no padding (the feature mask sum).")
         .def("log_mel", &Gemma4::log_mel, "audio"_a, "n_frames"_a,
-             nb::arg("out").none().noconvert() = nb::none(),
-             "Log-mel features (n_frames, 128): the valid frames of `audio`, then zeros. With "
-             "`out`, writes into it and returns None.")
+             nb::arg("out").none().noconvert() = nb::none(), "channel_last"_a = true,
+             "Log-mel features (n_frames, 128), or (128, n_frames) without channel_last: the "
+             "valid frames of `audio`, then zeros. With `out`, writes into it and returns None.")
         .def("log_mel_many", &Gemma4::log_mel_many, nb::arg("audios").noconvert(), "n_frames"_a,
              nb::arg("outs").noconvert(),
              "log_mel(audios[i], n_frames, out=outs[i]) for every i with one GIL release; "
