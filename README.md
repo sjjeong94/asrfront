@@ -81,6 +81,7 @@ from asrfront import whisper
 mel = whisper.log_mel(audio)  # (80, 3000): pad/trim to 30 s like whisper
 mel = whisper.log_mel(audio, n_mels=128)  # large-v3
 mel = whisper.log_mel(audio, pad_or_trim=False)  # (80, len(audio) // 160)
+mel = whisper.log_mel(audio, channel_last=True)  # (3000, 80)
 
 batch = whisper.log_mel_batch([a1, a2, a3])  # (3, 80, 3000), multi-threaded
 ```
@@ -95,6 +96,7 @@ from asrfront import sensevoice
 feat = sensevoice.fbank(audio, cmvn="path/to/am.mvn")  # (ceil(T / 6), 560)
 feats, lengths = sensevoice.fbank_batch([a1, a2], cmvn="path/to/am.mvn")  # zero-padded
 raw = sensevoice.fbank_raw(audio)  # (T, 80) kaldi fbank only
+raw = sensevoice.fbank_raw(audio, channel_last=False)  # (80, T); fbank takes it too
 shift, scale = sensevoice.load_cmvn("path/to/am.mvn")
 
 stream = sensevoice.FbankStream(cmvn="path/to/am.mvn")  # streaming, e.g. microphone input
@@ -113,6 +115,7 @@ give identical outputs.
 from asrfront import qwen3_asr
 
 mel = qwen3_asr.log_mel(audio)  # (128, len(audio) // 160), no 30 s pad / trim
+mel = qwen3_asr.log_mel(audio, channel_last=True)  # (len(audio) // 160, 128)
 feats, lengths = qwen3_asr.log_mel_batch([a1, a2])  # (2, 128, T) zero-padded, valid frames
 feats, lengths = qwen3_asr.log_mel_batch([a1, a2], hf_padding=True)  # transformers batches
 n_tokens = qwen3_asr.num_audio_tokens(lengths)  # audio placeholders in the prompt
@@ -130,6 +133,7 @@ on the batch. Details: [`docs/qwen3_asr.md`](https://github.com/sjjeong94/asrfro
 from asrfront import gemma4
 
 mel = gemma4.log_mel(audio)  # (T, 128), time first; at most 30 s, like transformers
+mel = gemma4.log_mel(audio, channel_last=False)  # (128, T)
 feats, lengths = gemma4.log_mel_batch([a1, a2])  # (2, T, 128) zero frames after `lengths`
 mask = np.arange(feats.shape[1]) < lengths[:, None]  # input_features_mask
 n_tokens = gemma4.num_audio_tokens(lengths)  # audio soft tokens in the prompt (<= 750)

@@ -52,7 +52,9 @@ def _frontend(n_mels: int, pad_or_trim: bool) -> _ext.WhisperFrontend:
     )
 
 
-def log_mel(audio: Any, n_mels: int = 80, pad_or_trim: bool = True) -> np.ndarray:
+def log_mel(
+    audio: Any, n_mels: int = 80, pad_or_trim: bool = True, channel_last: bool = False
+) -> np.ndarray:
     """Compute Whisper's log-mel spectrogram.
 
     Equivalent to ``whisper.log_mel_spectrogram(whisper.pad_or_trim(audio), n_mels)``
@@ -63,10 +65,12 @@ def log_mel(audio: Any, n_mels: int = 80, pad_or_trim: bool = True) -> np.ndarra
             torch tensor.
         n_mels: 80, or 128 for large-v3.
         pad_or_trim: pad/trim the input to 30 s (3000 frames) like ``whisper.pad_or_trim``.
+        channel_last: return ``(n_frames, n_mels)`` (time first, C-contiguous) instead.
 
     Returns:
-        float32 array of shape ``(n_mels, n_frames)``; ``n_frames`` is 3000 with
-        ``pad_or_trim``, otherwise ``len(audio) // 160``.
+        float32 array of shape ``(n_mels, n_frames)``, or ``(n_frames, n_mels)`` with
+        ``channel_last``; ``n_frames`` is 3000 with ``pad_or_trim``, otherwise
+        ``len(audio) // 160``.
 
     Raises:
         ValueError: ``audio`` is not 1-D or contains NaN / inf (with ``pad_or_trim``, only
@@ -82,7 +86,8 @@ def log_mel(audio: Any, n_mels: int = 80, pad_or_trim: bool = True) -> np.ndarra
         audio = audio[:N_SAMPLES]
     audio = convert_audio(audio)
     _check_length(audio, pad_or_trim)
-    return _frontend(n_mels, pad_or_trim).log_mel(audio)
+    mel = _frontend(n_mels, pad_or_trim).log_mel(audio)
+    return np.ascontiguousarray(mel.T) if channel_last else mel
 
 
 def log_mel_batch(

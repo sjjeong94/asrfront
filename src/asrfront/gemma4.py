@@ -67,7 +67,7 @@ def num_frames(n_samples: int, truncation: bool = True) -> int:
     return int(_ext.Gemma4Frontend.valid_frames(n))
 
 
-def log_mel(audio: Any, truncation: bool = True) -> np.ndarray:
+def log_mel(audio: Any, truncation: bool = True, channel_last: bool = True) -> np.ndarray:
     """Compute Gemma 4's audio input features for one waveform.
 
     Equivalent to ``Gemma4AudioFeatureExtractor(...)([audio])["input_features"][0]`` with the
@@ -78,9 +78,11 @@ def log_mel(audio: Any, truncation: bool = True) -> np.ndarray:
             torch tensor.
         truncation: use only the first 30 s, as transformers does by default (samples past it
             are neither converted nor checked). ``False`` computes the whole input.
+        channel_last: ``False`` returns ``(128, T)`` (mel first, C-contiguous) instead.
 
     Returns:
-        float32 array ``(T, 128)``, time first like transformers' ``input_features``:
+        float32 array ``(T, 128)`` (``(128, T)`` without ``channel_last``), time first like
+        transformers' ``input_features``:
         ``T = (L - 1) // 160`` frames for the input zero-padded to ``L``, the next multiple of
         128 samples. The first :func:`num_frames` frames are the features, the rest (at most
         one) are zeros.
@@ -93,7 +95,8 @@ def log_mel(audio: Any, truncation: bool = True) -> np.ndarray:
     if truncation:
         audio = audio[:MAX_SAMPLES]
     audio = convert_audio(audio)
-    return _frontend().log_mel(audio, _out_frames(audio.shape[0]))
+    mel = _frontend().log_mel(audio, _out_frames(audio.shape[0]))
+    return mel if channel_last else np.ascontiguousarray(mel.T)
 
 
 def log_mel_batch(

@@ -252,6 +252,33 @@ def test_log_mel_batch(sigs, n_threads):
         np.testing.assert_array_equal(out[i], log_mel(a))
 
 
+@pytest.mark.parametrize("pad_or_trim", [True, False])
+def test_log_mel_channel_last(sigs, pad_or_trim):
+    audio = sigs["speech"]
+    mel = log_mel(audio, n_mels=128, pad_or_trim=pad_or_trim)
+    out = log_mel(audio, n_mels=128, pad_or_trim=pad_or_trim, channel_last=True)
+    assert out.shape == mel.shape[::-1] and out.flags.c_contiguous
+    np.testing.assert_array_equal(out, mel.T)
+
+
+@pytest.mark.parametrize(
+    "fn, default",
+    [
+        (asrfront.qwen3_asr.log_mel, False),
+        (asrfront.gemma4.log_mel, True),
+        (fbank, True),
+        (fbank_raw, True),
+    ],
+)
+def test_channel_last_other_frontends(sigs, fn, default):
+    audio = sigs["speech"]
+    feat = fn(audio)
+    np.testing.assert_array_equal(fn(audio, channel_last=default), feat)
+    out = fn(audio, channel_last=not default)
+    assert out.shape == feat.shape[::-1] and out.flags.c_contiguous
+    np.testing.assert_array_equal(out, feat.T)
+
+
 def test_log_mel_batch_unpadded_and_128(sigs):
     audios = [sigs["speech"], sigs["short_1000"], sigs["odd_length"]]
     out = log_mel_batch(audios, n_mels=128, pad_or_trim=False, n_threads=2)

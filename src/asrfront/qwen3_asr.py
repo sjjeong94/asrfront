@@ -46,7 +46,7 @@ def _check_length(n: int, name: str) -> None:
         raise ValueError(f"{name} needs more than {N_FFT // 2} samples, got {n}")
 
 
-def log_mel(audio: Any) -> np.ndarray:
+def log_mel(audio: Any, channel_last: bool = False) -> np.ndarray:
     """Compute Qwen3-ASR's input features for one waveform.
 
     Equivalent to ``WhisperFeatureExtractor(feature_size=128)(audio, padding=True,
@@ -55,9 +55,11 @@ def log_mel(audio: Any) -> np.ndarray:
     Args:
         audio: 16 kHz mono waveform: float array in [-1, 1], int16 PCM, list, or CPU
             torch tensor.
+        channel_last: return ``(len(audio) // 160, 128)`` (time first, C-contiguous) instead.
 
     Returns:
-        float32 array of shape ``(128, len(audio) // 160)``.
+        float32 array of shape ``(128, len(audio) // 160)``, or its transpose with
+        ``channel_last``.
 
     Raises:
         ValueError: ``audio`` is not 1-D, contains NaN / inf, or has at most 200 samples.
@@ -65,7 +67,8 @@ def log_mel(audio: Any) -> np.ndarray:
     """
     audio = as_audio(audio)
     _check_length(audio.shape[0], "audio")
-    return _frontend().log_mel(audio)
+    mel = _frontend().log_mel(audio)
+    return np.ascontiguousarray(mel.T) if channel_last else mel
 
 
 def _check_out(out: Any, shape: tuple[int, int, int]) -> np.ndarray:

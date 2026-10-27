@@ -151,6 +151,7 @@ def fbank(
     lfr_n: int = 6,
     dither: float = 0.0,
     seed: int = 0,
+    channel_last: bool = True,
 ) -> np.ndarray:
     """Compute SenseVoice input features (FunASR ``WavFrontend``).
 
@@ -164,6 +165,8 @@ def fbank(
             deterministic inference.
         seed: dither RNG seed. The RNG is reseeded on every call, so identical inputs
             give identical outputs.
+        channel_last: ``False`` returns the transpose, ``(n_mels * lfr_m, ceil(T / lfr_n))``
+            (C-contiguous).
 
     Returns:
         float32 array of shape ``(ceil(T / lfr_n), n_mels * lfr_m)``, where
@@ -172,7 +175,8 @@ def fbank(
     n_mels, lfr_m, lfr_n, dither, seed = _check_params(n_mels, lfr_m, lfr_n, dither, seed)
     audio = as_audio(audio)
     cmvn_v = _resolve_cmvn(cmvn, n_mels * lfr_m)
-    return _frontend(n_mels, lfr_m, lfr_n, cmvn_v, dither, seed).fbank(audio)
+    feat = _frontend(n_mels, lfr_m, lfr_n, cmvn_v, dither, seed).fbank(audio)
+    return feat if channel_last else np.ascontiguousarray(feat.T)
 
 
 def fbank_batch(
@@ -216,14 +220,18 @@ def fbank_batch(
     return feats, lengths
 
 
-def fbank_raw(audio: Any, n_mels: int = 80, dither: float = 0.0, seed: int = 0) -> np.ndarray:
-    """Kaldi-compatible log-mel fbank without LFR/CMVN. Shape ``(T, n_mels)``.
+def fbank_raw(
+    audio: Any, n_mels: int = 80, dither: float = 0.0, seed: int = 0, channel_last: bool = True
+) -> np.ndarray:
+    """Kaldi-compatible log-mel fbank without LFR/CMVN. Shape ``(T, n_mels)``, or
+    ``(n_mels, T)`` (C-contiguous) with ``channel_last=False``.
 
     Same as ``torchaudio.compliance.kaldi.fbank(audio * 32768, num_mel_bins=n_mels,
     window_type="hamming", dither=dither, energy_floor=0)``.
     """
     n_mels, _, _, dither, seed = _check_params(n_mels, 1, 1, dither, seed)
-    return _frontend(n_mels, 1, 1, None, dither, seed).fbank_raw(as_audio(audio))
+    feat = _frontend(n_mels, 1, 1, None, dither, seed).fbank_raw(as_audio(audio))
+    return feat if channel_last else np.ascontiguousarray(feat.T)
 
 
 class FbankStream:
