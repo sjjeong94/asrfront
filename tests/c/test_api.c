@@ -453,6 +453,51 @@ static void test_sensevoice_stream(void) {
     free(audio);
 }
 
+/* af_lfm3_audio_*: frame counts, the two layouts (exact transposes, rows ld apart with the
+ * gaps untouched), frames past the input reading zeros, argument checks. */
+static void test_lfm3_audio(void) {
+    CHECK(af_lfm3_audio_out_frames(0) == 1 && af_lfm3_audio_out_frames(400) == 1);
+    CHECK(af_lfm3_audio_out_frames(401) == 2 && af_lfm3_audio_out_frames(560) == 2);
+    CHECK(af_lfm3_audio_out_frames(561) == 3 && af_lfm3_audio_out_frames(16000) == 99);
+    CHECK(af_lfm3_audio_complete_frames(399) == 0 && af_lfm3_audio_complete_frames(400) == 1);
+    CHECK(af_lfm3_audio_complete_frames(559) == 1 && af_lfm3_audio_complete_frames(560) == 2);
+    const size_t n = 16123, frames = af_lfm3_audio_out_frames(n) + 3, ld = frames + 5;
+    float *audio = malloc(n * sizeof(float));
+    float *a = malloc(128 * ld * sizeof(float)), *b = malloc(frames * 128 * sizeof(float));
+    for (size_t i = 0; i < n; i++)
+        audio[i] = 0.3f * sinf(0.013f * (float)i);
+    for (size_t i = 0; i < 128 * ld; i++)
+        a[i] = 7.0f;
+    af_lfm3_audio *h = NULL;
+    CHECK(af_lfm3_audio_create(&h) == AF_OK);
+    CHECK(af_lfm3_audio_log_mel(h, audio, n, frames, a, ld) == AF_OK);
+    CHECK(af_lfm3_audio_log_mel_channel_last(h, audio, n, frames, b, 128) == AF_OK);
+    int same = 1, gaps = 1, range = 1;
+    for (size_t m = 0; m < 128; m++) {
+        for (size_t t = 0; t < frames; t++) {
+            same &= memcmp(&a[m * ld + t], &b[t * 128 + m], 4) == 0;
+            range &= a[m * ld + t] >= -2.0f && a[m * ld + t] < 2.0f;
+        }
+        for (size_t t = frames; t < ld; t++)
+            gaps &= a[m * ld + t] == 7.0f;
+    }
+    CHECK(same && gaps && range);
+    /* the 3 frames past the padded input read only zeros: the floor, (-12 + 4) / 4 */
+    CHECK(b[(frames - 1) * 128] == -2.0f && b[(frames - 1) * 128 + 127] == -2.0f);
+    CHECK(af_lfm3_audio_log_mel(h, NULL, 0, 1, a, 1) == AF_OK && a[0] == -2.0f);
+    CHECK(af_lfm3_audio_log_mel(h, NULL, 0, 0, NULL, 0) == AF_OK);
+    CHECK(af_lfm3_audio_log_mel(h, audio, n, frames, a, frames - 1) == AF_EINVAL);
+    CHECK(af_lfm3_audio_log_mel_channel_last(h, audio, n, frames, b, 127) == AF_EINVAL);
+    CHECK(af_lfm3_audio_log_mel(h, NULL, 10, 1, a, 1) == AF_EINVAL);
+    CHECK(af_lfm3_audio_log_mel(NULL, audio, n, 1, a, 1) == AF_EINVAL);
+    CHECK(af_lfm3_audio_create(NULL) == AF_EINVAL);
+    af_lfm3_audio_destroy(h);
+    af_lfm3_audio_destroy(NULL);
+    free(audio);
+    free(a);
+    free(b);
+}
+
 int main(void) {
     test_whisper();
     test_whisper_silence_skip();
@@ -463,6 +508,7 @@ int main(void) {
     test_sensevoice_stream();
     test_gemma4();
     test_gemma4_channel_first();
+    test_lfm3_audio();
     test_kernels_extra();
     test_misc();
     if (failures) {

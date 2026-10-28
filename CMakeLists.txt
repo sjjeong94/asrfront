@@ -112,6 +112,7 @@ add_library(asrfront_core STATIC
   csrc/flac.c
   csrc/gemma4.c
   csrc/kernels.c
+  csrc/lfm3_audio.c
   csrc/melbank.c
   csrc/mp3.c
   csrc/pcm.c

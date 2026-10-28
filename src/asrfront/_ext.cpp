@@ -382,6 +382,54 @@ struct Gemma4 {
     }
 };
 
+struct Lfm3Audio {
+    af_lfm3_audio *h = nullptr;
+    std::atomic<bool> busy{false};
+
+    Lfm3Audio() { check(af_lfm3_audio_create(&h)); }
+    ~Lfm3Audio() { af_lfm3_audio_destroy(h); }
+    Lfm3Audio(const Lfm3Audio &) = delete;
+    Lfm3Audio &operator=(const Lfm3Audio &) = delete;
+
+    int run(const Audio &audio, size_t n_frames, float *o, size_t ld, bool channel_last) {
+        return channel_last
+                   ? af_lfm3_audio_log_mel_channel_last(h, audio.data(), audio.shape(0), n_frames,
+                                                        o, ld)
+                   : af_lfm3_audio_log_mel(h, audio.data(), audio.shape(0), n_frames, o, ld);
+    }
+
+    nb::object log_mel(Audio audio, size_t n_frames, OutRows out, bool channel_last) {
+        Busy guard(busy);
+        const size_t rows = channel_last ? n_frames : 128, cols = channel_last ? 128 : n_frames;
+        if (!out)
+            return nb::cast(compute_2d(
+                rows, cols, [&](float *o) { return run(audio, n_frames, o, cols, channel_last); }));
+        check_shape(*out, rows, cols);
+        const size_t ld = row_stride(*out, cols);
+        int rc;
+        {
+            nb::gil_scoped_release release;
+            rc = run(audio, n_frames, out->data(), ld, channel_last);
+        }
+        check(rc);
+        return nb::none();
+    }
+
+    // outs[i]: (128, frames_i), rows spaced apart (feats[i, :, :frames_i] of a padded batch).
+    int64_t log_mel_many(const std::vector<Audio> &audios, const std::vector<Rows> &outs) {
+        Busy guard(busy);
+        check_count(audios.size(), outs.size());
+        std::vector<size_t> ld(outs.size());
+        for (size_t i = 0; i < outs.size(); i++) {
+            check_shape(outs[i], 128, outs[i].shape(1));
+            ld[i] = row_stride(outs[i], outs[i].shape(1));
+        }
+        return run_many(audios, [&](size_t i) {
+            return run(audios[i], outs[i].shape(1), outs[i].data(), ld[i], false);
+        });
+    }
+};
+
 NB_MODULE(_ext, m) {
     m.doc() = "asrfront native extension";
     m.attr("__version__") = af_version();
@@ -569,6 +617,22 @@ NB_MODULE(_ext, m) {
              nb::arg("outs").noconvert(),
              "log_mel(audios[i], n_frames, out=outs[i]) for every i with one GIL release; "
              "returns as WhisperFrontend.log_mel_many.");
+
+    nb::class_<Lfm3Audio>(m, "Lfm3AudioFrontend")
+        .def(nb::init<>())
+        .def_static("out_frames", &af_lfm3_audio_out_frames, "n_samples"_a,
+                    "Frames of the input right-padded to whole windows.")
+        .def_static("complete_frames", &af_lfm3_audio_complete_frames, "n_samples"_a,
+                    "Frames that read no padding.")
+        .def("log_mel", &Lfm3Audio::log_mel, "audio"_a, "n_frames"_a,
+             nb::arg("out").none().noconvert() = nb::none(), "channel_last"_a = false,
+             "Log-mel features (128, n_frames), or (n_frames, 128) with channel_last; frames "
+             "past the input read zeros. With `out` (float32, contiguous rows), writes into it "
+             "and returns None.")
+        .def("log_mel_many", &Lfm3Audio::log_mel_many, nb::arg("audios").noconvert(),
+             nb::arg("outs").noconvert(),
+             "log_mel(audios[i], outs[i].shape[1], out=outs[i]) for every i with one GIL "
+             "release; returns as WhisperFrontend.log_mel_many.");
 
     nb::class_<SenseVoiceStream>(m, "SenseVoiceStream")
         .def(nb::init<int, int, int, float, unsigned long long, std::optional<Vec>,

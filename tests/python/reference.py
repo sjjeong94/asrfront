@@ -6,6 +6,7 @@
   ``apply_lfr`` / ``apply_cmvn`` / ``load_cmvn`` from FunASR's ``WavFrontend`` (MIT).
 - Gemma 4: port of transformers' ``Gemma4AudioFeatureExtractor`` and ``mel_filter_bank``
   (Apache-2.0) with the E2B / E4B checkpoints' settings.
+- LFM3-Audio: port of LiquidAI LFM3-Audio-2B's ``Lfm3AudioFeatureExtractor`` (Apache-2.0).
 - Audio loading: ffmpeg's decode -> resample -> downmix -> s16 pipeline as used by whisper's
   ``load_audio``, written from the behavior spec in ``docs/load.md`` (not from ffmpeg's code).
 
@@ -250,6 +251,83 @@ def gemma4_transformers(audios: list[np.ndarray]) -> tuple[np.ndarray, np.ndarra
     )
     out = fe([np.asarray(a, dtype=np.float32) for a in audios], return_tensors="np")
     return out["input_features"], out["input_features_mask"].sum(-1)
+
+
+# ---------------------------------------------------------------------------------------------
+# LFM3-Audio
+# ---------------------------------------------------------------------------------------------
+
+LFM3_N_FFT = 400
+LFM3_HOP = 160
+
+
+def lfm3_audio_num_frames(n_samples: int) -> int:
+    """``Lfm3AudioFeatureExtractor.num_frames``: frames of the clip right-padded by
+    ``pad_length``."""
+    padded = LFM3_N_FFT if n_samples < LFM3_N_FFT else n_samples + (-(n_samples - 400) % 160)
+    return 1 + (padded - LFM3_N_FFT) // LFM3_HOP
+
+
+def lfm3_audio_log_mel_stages(audio: np.ndarray) -> dict:
+    """LFM3-Audio features of one clip: ``power``, ``mel``, ``out`` ``(128, T)``."""
+    audio = np.asarray(audio, dtype=np.float64)
+    n_frames = lfm3_audio_num_frames(audio.shape[0])
+    x = np.zeros((n_frames - 1) * LFM3_HOP + LFM3_N_FFT)
+    x[: audio.shape[0]] = audio
+    idx = np.arange(n_frames)[:, None] * LFM3_HOP + np.arange(LFM3_N_FFT)[None, :]
+    frames = x[idx] * hann_window_periodic(LFM3_N_FFT)  # center=False
+    power = (np.abs(np.fft.rfft(frames, axis=-1)) ** 2).T
+    mel = slaney_mel_filters(n_fft=LFM3_N_FFT, n_mels=128) @ power
+    with np.errstate(divide="ignore"):
+        log = np.maximum(np.log10(mel), -12.0)
+    return {"power": power, "mel": mel, "out": (log + 4.0) / 4.0}
+
+
+def lfm3_audio_log_mel(audio: np.ndarray) -> np.ndarray:
+    return lfm3_audio_log_mel_stages(audio)["out"]
+
+
+def lfm3_audio_torch(audios: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Port of LFM3-Audio-2B's ``Lfm3AudioFeatureExtractor.__call__`` (its
+    ``feature_extraction_lfm3_audio.py``, Apache-2.0): ``torch.stft`` without centering,
+    transformers' Slaney ``mel_filter_bank`` (float64, cast to float32), ``log10``, clamp at
+    -12, ``(x + 4) / 4``; features zero-padded to the longest clip. Returns ``(features
+    (B, 128, T), mask sums (B,))``. Needs torch and transformers."""
+    import torch
+    from transformers.audio_utils import mel_filter_bank
+
+    filters = mel_filter_bank(
+        num_frequency_bins=201,
+        num_mel_filters=128,
+        min_frequency=0.0,
+        max_frequency=8000.0,
+        sampling_rate=16000,
+        norm="slaney",
+        mel_scale="slaney",
+    )
+    feats = []
+    for a in audios:
+        clip = torch.from_numpy(np.array(a, dtype=np.float32))  # a writable copy
+        n = clip.shape[0]
+        pad = LFM3_N_FFT if n < LFM3_N_FFT else n + (-(n - LFM3_N_FFT) % LFM3_HOP)
+        clip = torch.nn.functional.pad(clip, (0, pad - n))
+        spec = torch.stft(
+            clip,
+            n_fft=LFM3_N_FFT,
+            hop_length=LFM3_HOP,
+            win_length=LFM3_N_FFT,
+            window=torch.hann_window(LFM3_N_FFT),
+            center=False,
+            return_complex=True,
+        )
+        power = spec.abs().square()
+        mel = torch.from_numpy(filters).to(power.dtype).T @ power
+        feats.append(((mel.log10().clamp(min=-12.0) + 4.0) / 4.0).numpy())
+    lengths = np.array([f.shape[-1] for f in feats])
+    out = np.zeros((len(feats), 128, int(lengths.max())), np.float32)
+    for i, f in enumerate(feats):
+        out[i, :, : f.shape[-1]] = f
+    return out, lengths
 
 
 def load_whisper_mel_filters(path: str | Path, n_mels: int) -> np.ndarray:

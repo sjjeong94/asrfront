@@ -1,6 +1,6 @@
 /*
- * asrfront - dependency-free ASR frontends (Whisper log-mel, SenseVoice fbank, Gemma 4
- * audio log-mel).
+ * asrfront - dependency-free ASR frontends (Whisper log-mel, SenseVoice fbank, Gemma 4 and
+ * LFM3-Audio audio log-mel).
  *
  * Usage pattern: create a handle once (precomputes windows, FFT plans, filter
  * banks and scratch space), call the compute function as many times as needed,
@@ -163,6 +163,34 @@ int af_gemma4_log_mel(af_gemma4 *h, const float *audio, size_t n_samples, size_t
 /* The same transposed: out (128, n_frames). */
 int af_gemma4_log_mel_channel_first(af_gemma4 *h, const float *audio, size_t n_samples,
                                     size_t n_frames, float *out);
+
+/* ------------------------------------------------------------------------ */
+/* LFM3-Audio log-mel (LiquidAI Lfm3AudioFeatureExtractor)                  */
+/* ------------------------------------------------------------------------ */
+
+/* LFM3-Audio-2B: 128 Slaney mel bins of the power spectrum of 25 ms Hann windows every 10 ms
+ * without centering, (max(log10(mel), -12) + 4) / 4 (see docs/lfm3_audio.md). Frames are
+ * independent of each other: frame t reads samples [160 t, 160 t + 400) of the input followed
+ * by zeros. */
+typedef struct af_lfm3_audio af_lfm3_audio;
+
+int af_lfm3_audio_create(af_lfm3_audio **out);
+void af_lfm3_audio_destroy(af_lfm3_audio *h);
+
+/* Frames of the extractor's output: the input right-padded with zeros to whole windows,
+ * 1 + ceil((n_samples - 400) / 160), and 1 for n_samples <= 400. */
+size_t af_lfm3_audio_out_frames(size_t n_samples);
+/* Frames that read no padding (0 for n_samples < 400), as its streaming mode emits them. */
+size_t af_lfm3_audio_complete_frames(size_t n_samples);
+
+/* n_frames frames of the input (any number; frames past it read zeros). out: (128, n_frames)
+ * float32 with mel row m at out + m * ld (ld >= n_frames; elements after a row's n_frames
+ * are not touched), e.g. into a zero-padded batch (128, T >= n_frames). */
+int af_lfm3_audio_log_mel(af_lfm3_audio *h, const float *audio, size_t n_samples, size_t n_frames,
+                          float *out, size_t ld);
+/* The same transposed: frame t at out + t * ld (ld >= 128). */
+int af_lfm3_audio_log_mel_channel_last(af_lfm3_audio *h, const float *audio, size_t n_samples,
+                                       size_t n_frames, float *out, size_t ld);
 
 /* ------------------------------------------------------------------------ */
 /* Audio loading (16 kHz mono float32, as whisper's ffmpeg-based load_audio) */

@@ -22,4 +22,4 @@ Not part of the installed package; in the repository and the sdist.
 | `librosa.txt` | [librosa](https://github.com/librosa/librosa) | `tests/python/reference.py` (`librosa.filters.mel`) |
 | `torchaudio.txt` | [pytorch/audio](https://github.com/pytorch/audio) | `tests/python/reference.py` (port of `torchaudio.compliance.kaldi.fbank`) |
 | `FunASR.txt` | [modelscope/FunASR](https://github.com/modelscope/FunASR) | `tests/python/reference.py` (`apply_lfr` / `apply_cmvn` / `load_cmvn` of `WavFrontend`), excerpts in `docs/sensevoice.md` |
-| `transformers.txt` | [huggingface/transformers](https://github.com/huggingface/transformers) | `tests/python/reference.py` (port of `Gemma4AudioFeatureExtractor` and `mel_filter_bank`, rewritten in float64 numpy) |
+| `transformers.txt` | [huggingface/transformers](https://github.com/huggingface/transformers) | `tests/python/reference.py` (port of `Gemma4AudioFeatureExtractor` and `mel_filter_bank`, rewritten in float64 numpy; port of LFM3-Audio-2B's `Lfm3AudioFeatureExtractor`, Apache-2.0 under the same notice) |
