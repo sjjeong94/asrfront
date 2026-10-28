@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "asrfront.h"
 #include "fft.h"
@@ -175,9 +176,7 @@ static void log_mel_body(af_whisper *h, const float *audio, size_t n_in, size_t 
         }
         for (int m = 0; m < n_mels; m++) { /* SoA rows map to contiguous output runs */
             float *dst = out + (size_t)m * ld + t0;
-            const float *row = h->melv + (size_t)m * AF_VL;
-            for (int l = 0; l < count; l++)
-                dst[l] = row[l];
+            memcpy(dst, h->melv + (size_t)m * AF_VL, (size_t)count * sizeof(float));
         }
     }
 

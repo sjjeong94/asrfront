@@ -485,8 +485,12 @@ static void test_lfm3_audio(void) {
             same &= memcmp(&x, &y, 4) == 0;
             range &= x >= -2.0f && x < 2.0f;
         }
-        for (size_t t = frames; t < ld; t++)
+        for (size_t t = frames; t < ld; t++) {
+            if (gaps && a[m * ld + t] != 7.0f)
+                fprintf(stderr, "lfm3: mel %zu gap column %zu: %.9g, not 7\n", m, t,
+                        (double)a[m * ld + t]);
             gaps &= a[m * ld + t] == 7.0f;
+        }
     }
     CHECK(same);
     CHECK(gaps);

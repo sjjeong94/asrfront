@@ -108,9 +108,7 @@ static int log_mel(af_lfm3_audio *h, const float *audio, size_t n_samples, size_
         }
         for (int m = 0; m < LFM3_N_MELS; m++) { /* SoA rows map to contiguous output runs */
             float *dst = out + (size_t)m * ld + t0;
-            const float *row = h->melv + (size_t)m * AF_VL;
-            for (int l = 0; l < count; l++)
-                dst[l] = row[l];
+            memcpy(dst, h->melv + (size_t)m * AF_VL, (size_t)count * sizeof(float));
         }
     }
     af_ftz_leave(fp);
