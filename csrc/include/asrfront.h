@@ -223,7 +223,9 @@ int af_load_memory_ex(const void *buf, size_t size, af_raw_mode raw, size_t max_
 /* Same for a file (UTF-8 path). `.pcm` / `.raw` extensions select AF_RAW_FORCE,
  * anything else AF_RAW_NEVER. */
 int af_load_file(const char *path_utf8, float **out, size_t *n_samples);
-/* af_load_file with af_load_memory_ex's max_samples and err. */
+/* af_load_file with af_load_memory_ex's max_samples and err. With max_samples, a WAV, Wave64,
+ * NIST SPHERE or raw PCM file is checked as it is read and fails with AF_ETOOLONG as soon as the
+ * part read is too long, without reading the rest. */
 int af_load_file_ex(const char *path_utf8, size_t max_samples, float **out, size_t *n_samples,
                     char *err, size_t err_size);
 

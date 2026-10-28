@@ -4,12 +4,14 @@
  * int16 value / 32768, so it lies in [-1, 32767/32768] and is an exact multiple of 2^-15.
  * A decoded file is loaded again with af_load_memory_ex at its own length (same output) and
  * one sample less (AF_ETOOLONG). The error description is printable ASCII, set exactly for
- * AF_EUNSUPPORTED / AF_ECORRUPT, and af_probe_memory agrees with the load. */
+ * AF_EUNSUPPORTED / AF_ECORRUPT, and af_probe_memory agrees with the load. Prefixes of a decoded
+ * file are never judged too long for its own length (af_prefix_too_long). */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "asrfront.h"
+#include "audio.h" /* internal: af_prefix_too_long */
 
 static void check(int ok) {
     if (!ok)
@@ -67,6 +69,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             af_audio_free(lim);
             rc = af_load_memory_ex(data, size, modes[m], n - 1, &lim, &n_lim, NULL, 0);
             check((rc == AF_ETOOLONG || rc == AF_ENOMEM) && lim == NULL && n_lim == 0);
+        }
+        /* af_prefix_too_long never rejects a prefix of a file that loads within the limit, and
+         * a prefix it rejects fails to load as it says (af_load_file_ex relies on both) */
+        if (m == 0 && n > 0) {
+            for (size_t p = size / 2; p < size; p += (size - p + 1) / 2) {
+                check(af_prefix_too_long(data, p, AF_RAW_NEVER, n) != 1);
+                if (af_prefix_too_long(data, p, AF_RAW_NEVER, 1) == 1) {
+                    float *pre = NULL;
+                    size_t n_pre = 0;
+                    rc = af_load_memory_ex(data, p, AF_RAW_NEVER, 1, &pre, &n_pre, NULL, 0);
+                    check(rc == AF_ETOOLONG && pre == NULL);
+                }
+            }
         }
         af_audio_free(out);
     }

@@ -172,6 +172,7 @@ if(ASRFRONT_BUILD_TESTS)
   endforeach()
   # The fuzz target's checks on the seed corpus, without libFuzzer (any compiler).
   add_executable(fuzz_replay tests/fuzz/fuzz_load.c tests/fuzz/fuzz_main.c)
+  target_include_directories(fuzz_replay PRIVATE csrc)  # internal: af_prefix_too_long
   target_link_libraries(fuzz_replay PRIVATE asrfront_core)
   add_test(NAME fuzz_corpus COMMAND fuzz_replay ${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus)
   # in sanitizer builds: no single allocation above 1 GiB (inputs are a few kB)
@@ -180,6 +181,7 @@ endif()
 
 if(ASRFRONT_BUILD_FUZZ)
   add_executable(fuzz_load tests/fuzz/fuzz_load.c)
+  target_include_directories(fuzz_load PRIVATE csrc)  # internal: af_prefix_too_long
   target_link_libraries(fuzz_load PRIVATE asrfront_core)
   target_link_options(fuzz_load PRIVATE -fsanitize=fuzzer)
 endif()

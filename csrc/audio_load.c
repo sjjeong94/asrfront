@@ -1,7 +1,11 @@
 /* af_load_*: format detection, decoding and conversion to 16 kHz mono float32. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L /* fileno */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -314,6 +318,31 @@ int af_probe_memory(const void *buf_, size_t size, af_raw_mode raw, size_t max_s
     return rc;
 }
 
+int af_prefix_too_long(const uint8_t *buf, size_t size, af_raw_mode raw, size_t max_samples) {
+    if (max_samples == 0 || (!buf && size > 0))
+        return -1;
+    if (!buf)
+        buf = (const uint8_t *)"";
+    /* Only containers whose frame count cannot shrink as the file goes on: the samples run from
+     * one header (all before them) to min(their stated size, the end of the input). A WAV ends
+     * its parsing at the first data chunk; AIFF and CAF read chunks after the samples, where a
+     * later sound / data or COMM chunk would replace what the prefix shows. Raw PCM only when
+     * forced: with AF_RAW_AUTO, MP3 found further on would change the container. */
+    size_t mp3_off;
+    const container fmt = raw == AF_RAW_FORCE ? FMT_UNKNOWN : detect(buf, size, &mp3_off);
+    if (!(fmt == FMT_WAV || fmt == FMT_W64 || fmt == FMT_SPHERE ||
+          (fmt == FMT_UNKNOWN && raw == AF_RAW_FORCE)))
+        return -1;
+    af_decoded d;
+    memset(&d, 0, sizeof d);
+    d.probe = 1;
+    container fmt_out;
+    int described;
+    const int rc = decode(buf, size, raw, max_samples, &d, &fmt_out, &described, NULL, 0);
+    af_decoded_free(&d);
+    return rc == AF_ETOOLONG ? 1 : 0;
+}
+
 static int has_raw_extension(const char *path) {
     const char *dot = strrchr(path, '.');
     const char *sep = strrchr(path, '/');
@@ -347,6 +376,20 @@ static FILE *open_utf8(const char *path) {
 #endif
 }
 
+/* Size of a regular file, 0 if unknown (not a regular file, or too large for a size_t). */
+static size_t regular_file_size(FILE *f) {
+#ifdef _WIN32
+    struct _stat64 st;
+    if (_fstat64(_fileno(f), &st) != 0 || !(st.st_mode & _S_IFREG))
+        return 0;
+#else
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode))
+        return 0;
+#endif
+    return st.st_size > 0 && (unsigned long long)st.st_size < SIZE_MAX ? (size_t)st.st_size : 0;
+}
+
 int af_load_file(const char *path_utf8, float **out, size_t *n_samples) {
     return af_load_file_ex(path_utf8, 0, out, n_samples, NULL, 0);
 }
@@ -362,12 +405,20 @@ int af_load_file_ex(const char *path_utf8, size_t max_samples, float **out, size
     FILE *f = open_utf8(path_utf8);
     if (!f)
         return AF_EIO;
+    const af_raw_mode raw = has_raw_extension(path_utf8) ? AF_RAW_FORCE : AF_RAW_NEVER;
+    /* A regular file is read into one buffer of its size (one byte more, to see it end); other
+     * files, and one that grows meanwhile, into a doubling buffer. */
+    const size_t expect = regular_file_size(f);
     uint8_t *buf = NULL;
     size_t size = 0, cap = 0;
+    /* With a limit, af_prefix_too_long() looks at what has been read at 1 MiB, 2 MiB, 4 MiB, ...
+     * (until it says the container cannot tell), so a long WAV is rejected without reading it
+     * all. The load then runs on that prefix, which fails as the whole file would. */
+    size_t check = max_samples ? AF_PREFIX_CHECK_BYTES : SIZE_MAX;
     int rc = AF_OK;
     for (;;) {
         if (size == cap) {
-            size_t ncap = cap ? cap * 2 : (size_t)1 << 20;
+            size_t ncap = cap ? cap * 2 : expect ? expect + 1 : (size_t)1 << 20;
             uint8_t *nb = ncap > cap ? realloc(buf, ncap) : NULL;
             if (!nb) {
                 rc = AF_ENOMEM;
@@ -376,19 +427,24 @@ int af_load_file_ex(const char *path_utf8, size_t max_samples, float **out, size
             buf = nb;
             cap = ncap;
         }
-        size_t got = fread(buf + size, 1, cap - size, f);
+        const size_t want = cap - size < check - size ? cap - size : check - size;
+        const size_t got = fread(buf + size, 1, want, f);
         size += got;
-        if (got == 0) {
+        if (got < want) {
             if (ferror(f))
                 rc = AF_EIO;
             break;
         }
+        if (size == check) {
+            const int known = af_prefix_too_long(buf, size, raw, max_samples);
+            if (known > 0)
+                break;
+            check = known < 0 || check > SIZE_MAX / 2 ? SIZE_MAX : check * 2;
+        }
     }
     fclose(f);
     if (rc == AF_OK)
-        rc =
-            af_load_memory_ex(buf, size, has_raw_extension(path_utf8) ? AF_RAW_FORCE : AF_RAW_NEVER,
-                              max_samples, out, n_samples, err, err_size);
+        rc = af_load_memory_ex(buf, size, raw, max_samples, out, n_samples, err, err_size);
     free(buf);
     return rc;
 }

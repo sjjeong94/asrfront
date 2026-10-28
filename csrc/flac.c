@@ -91,10 +91,12 @@ int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *ou
     /* Decode as left-justified s32, growing the buffer: the header's total may be 0 (unknown)
      * or larger than what a truncated file holds. It is a hint only, never trusted beyond the
      * input size: a 10 kB file claiming 2^28 frames must not allocate gigabytes up front. */
-    /* frames: the file at 4:1 compression (which covers most audio; quieter or simpler signals
-     * compress further and grow the buffer). Not more per byte of file for more channels or
-     * bits: 8-channel 32-bit audio must not reserve 32 bytes per byte of file up front. */
-    size_t cap = 65536 + size / ((size_t)ch * (size_t)((bps + 7) / 8)) * 4;
+    /* frames: the file at 2:1 compression (typical for speech and music; quieter or simpler
+     * signals compress further and grow the buffer, by doubling). Not more: the buffer holds
+     * 4-byte samples, so this already reserves 4 bytes per byte of 16-bit file up front, which
+     * fails without overcommit (Windows, strict containers) for large files of unknown length.
+     * Not more per byte of file for more channels or bits either. */
+    size_t cap = 65536 + size / ((size_t)ch * (size_t)((bps + 7) / 8)) * 2;
     /* One frame more than the header's total, so that a truthful total ends with a short read
      * (n < cap) instead of growing the full buffer just before EOF. */
     if (f->totalPCMFrameCount > 0 && f->totalPCMFrameCount < cap)

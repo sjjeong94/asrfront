@@ -264,6 +264,41 @@ def test_max_duration_large_finite_values(tmp_path, duration):
     np.testing.assert_array_equal(asrfront.load(path.read_bytes(), max_duration=duration), expected)
 
 
+def test_max_duration_reads_long_files_partly(tmp_path):
+    """With max_duration, a WAV / raw PCM file far longer than it is rejected from its first
+    MiB, not read whole; files the prefix cannot decide, and allowed ones, are read whole."""
+    from asrfront import _load
+
+    x = noise_s16(16000 * 120)  # 2 min, 3.7 MiB
+    wav = write_wav(tmp_path / "long.wav", x)
+    pcm = tmp_path / "long.pcm"
+    pcm.write_bytes(x.tobytes())
+    aiff = tmp_path / "long.aiff"  # a later SSND / COMM chunk could change the count
+    aiff.write_bytes(b"FORM\0\0\0\0AIFF" + b"\0" * (len(x) * 2))
+    for path, raw, rejected_early in [
+        (wav, _load._RAW_NEVER, True),
+        (pcm, _load._RAW_FORCE, True),
+        (aiff, _load._RAW_NEVER, False),
+    ]:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            data = _load._read_file(f, raw, 16000 * 10)
+        assert len(data) == (1 << 20 if rejected_early else size)
+        for limit in [0, 16000 * 1000]:  # read whole
+            with open(path, "rb") as f:
+                assert _load._read_file(f, raw, limit).tobytes() == path.read_bytes()
+    for path in [wav, pcm]:
+        with pytest.raises(ValueError, match="longer than max_duration"):
+            asrfront.load(path, max_duration=10)
+        with pytest.raises(ValueError, match="longer than max_duration"):
+            asrfront.info(path, max_duration=10)
+        with pytest.raises(ValueError, match="longer than max_duration"):
+            asrfront.load(path, max_duration=119.99)  # only the whole file tells
+        np.testing.assert_array_equal(
+            asrfront.load(path, max_duration=120), x.astype(np.float32) / 32768
+        )
+
+
 def test_error_details(tmp_path):
     """Errors say what is unsupported (or which container is broken) and list what is."""
     wav = write_wav(tmp_path / "a.wav", noise_s16(100)).read_bytes()

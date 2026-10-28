@@ -16,6 +16,7 @@
 
 #include "asrfront.h"
 extern "C" {
+#include "audio.h"    // internal: af_prefix_too_long
 #include "kernels.h"  // internal: af_all_finite
 #include "melbank.h"  // internal; exposed for tests only
 #include "resample.h" // internal; exposed for tests only
@@ -522,6 +523,15 @@ NB_MODULE(_ext, m) {
         "data"_a, "raw"_a, "max_samples"_a = 0,
         "What load_memory would decode, without decoding: (container, sample_rate, channels, "
         "n_frames, n_samples). Raises as load_memory.");
+
+    m.def(
+        "_prefix_too_long",
+        [](Bytes data, int raw, size_t max_samples) {
+            return af_prefix_too_long(data.data(), data.shape(0), (af_raw_mode)raw, max_samples);
+        },
+        "data"_a, "raw"_a, "max_samples"_a,
+        "Whether the first bytes of a file show that it decodes to more than max_samples: 1 "
+        "(loading these bytes fails the same way), 0 (not yet), -1 (no prefix can tell).");
 
     m.def(
         "_resample",

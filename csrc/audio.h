@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "asrfront.h"
+
 /* Decoder output sample formats (they select ffmpeg's arithmetic path). */
 typedef enum {
     AF_SFMT_U8,
@@ -136,6 +138,15 @@ int af_pcm_decode_raw(const uint8_t *buf, size_t size, size_t limit,
                       af_decoded *out); /* s16le 16k mono */
 int af_flac_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out);
 int af_mp3_decode(const uint8_t *buf, size_t size, size_t limit, af_decoded *out);
+
+/* Whether the first `size` bytes of a file already show that af_load_memory_ex(file, raw,
+ * max_samples) fails with AF_ETOOLONG: 1 if so (and then so does the load of these bytes alone),
+ * 0 if not (yet: more of the file may tell), -1 if no prefix can tell (no limit, or a container
+ * other than WAV, Wave64, NIST SPHERE and forced raw PCM; FLAC and MP3 would be decoded). For
+ * readers of large files: af_load_file_ex and the Python binding. */
+int af_prefix_too_long(const uint8_t *buf, size_t size, af_raw_mode raw, size_t max_samples);
+/* Where af_load_file_ex first calls it (then at twice that, and so on). */
+#define AF_PREFIX_CHECK_BYTES ((size_t)1 << 20)
 
 /* Mono downmix weights (normalized when their sum exceeds 1). */
 void af_downmix_weights(const uint32_t *layout, int channels, double *w);

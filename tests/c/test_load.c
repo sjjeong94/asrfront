@@ -637,6 +637,28 @@ static void test_file(void) {
     CHECK(af_load_file_ex(path, 8, &a, &n, err, sizeof err) == AF_OK && n == 8 && !err[0]);
     af_audio_free(a);
     CHECK(af_load_file_ex(path, 7, &a, &n, err, sizeof err) == AF_ETOOLONG && !a && n == 0);
+    /* A WAV larger than the first prefix check: rejected from a prefix (n_big / 4), else after
+     * reading it whole (n_big - 1, which only the whole file exceeds), or loaded (n_big) */
+    const size_t n_big = AF_PREFIX_CHECK_BYTES; /* frames: 2 MiB of s16 samples */
+    f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f) {
+        buf_t h;
+        wav_head(&h, 1, 1, 16000, 16, 0);
+        put(&h, "data", 4);
+        put32(&h, (uint32_t)(2 * n_big));
+        fwrite(h.b, 1, h.n, f);
+        static const uint8_t zeros[4096];
+        for (size_t i = 0; i < 2 * n_big; i += sizeof zeros)
+            fwrite(zeros, 1, sizeof zeros, f);
+        fclose(f);
+        CHECK(af_load_file_ex(path, n_big / 4, &a, &n, err, sizeof err) == AF_ETOOLONG && !a);
+        CHECK(af_load_file_ex(path, n_big - 1, &a, &n, err, sizeof err) == AF_ETOOLONG && !a);
+        CHECK(af_load_file_ex(path, n_big, &a, &n, err, sizeof err) == AF_OK && n == n_big);
+        af_audio_free(a);
+        CHECK(af_load_file_ex(path, 0, &a, &n, err, sizeof err) == AF_OK && n == n_big);
+        af_audio_free(a);
+    }
     f = fopen(path, "wb");
     if (f) {
         fwrite("RIFF\0\0\0\0WAVEfmt \2\0\0\0", 1, 18, f); /* truncated fmt chunk */
@@ -645,6 +667,31 @@ static void test_file(void) {
               strcmp(err, "WAV") == 0);
     }
     remove(path);
+}
+
+static void test_prefix_too_long(void) {
+    buf_t w;
+    wav_head(&w, 1, 1, 16000, 16, 0);
+    put(&w, "data\xff\xff\xff\xff", 8); /* streamed: to the end of the input */
+    for (int i = 0; i < 16; i++)
+        put(&w, "\x11", 1); /* 8 frames so far */
+    CHECK(af_prefix_too_long(w.b, w.n, AF_RAW_NEVER, 7) == 1);
+    CHECK(af_prefix_too_long(w.b, w.n, AF_RAW_NEVER, 8) == 0);  /* more may follow */
+    CHECK(af_prefix_too_long(w.b, w.n, AF_RAW_NEVER, 0) == -1); /* no limit */
+    CHECK(af_prefix_too_long(w.b, 30, AF_RAW_NEVER, 1) == 0);   /* inside the fmt chunk */
+    float *a = NULL;
+    size_t n = 0; /* the prefix's load fails as the prefix check says */
+    CHECK(af_load_memory_ex(w.b, w.n, AF_RAW_NEVER, 7, &a, &n, NULL, 0) == AF_ETOOLONG);
+    static const uint8_t pcm[6] = {0};
+    CHECK(af_prefix_too_long(pcm, 6, AF_RAW_FORCE, 2) == 1);
+    CHECK(af_prefix_too_long(pcm, 6, AF_RAW_FORCE, 3) == 0);
+    CHECK(af_prefix_too_long(pcm, 6, AF_RAW_AUTO, 2) == -1); /* MP3 may turn up later */
+    CHECK(af_prefix_too_long(pcm, 6, AF_RAW_NEVER, 2) == -1);
+    /* containers where later chunks may change the count, or that decode to count */
+    static const char *const others[] = {"FORM\0\0\0\0AIFF", "caff\0\1\0\0desc",
+                                         "fLaC\0\0\0\0\0\0\0\0"};
+    for (size_t i = 0; i < sizeof others / sizeof *others; i++)
+        CHECK(af_prefix_too_long((const uint8_t *)others[i], 12, AF_RAW_NEVER, 1) == -1);
 }
 
 static void test_probe(void) {
@@ -784,6 +831,7 @@ int main(void) {
     test_adpcm();
     test_coreaudio_layouts();
     test_file();
+    test_prefix_too_long();
     test_probe();
     test_resampler_cache();
     test_resampler_limits();

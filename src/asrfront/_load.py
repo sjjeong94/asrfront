@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import math
 import os
+import stat
 from typing import Callable, NamedTuple, TypeVar, Union
 
 import numpy as np
@@ -96,11 +98,43 @@ def _with_source(
         # read() rather than mmap: a file truncated by another process while mapped would
         # crash the interpreter with SIGBUS
         with open(path, "rb") as f:
-            data = np.frombuffer(f.read(), dtype=np.uint8)
+            data = _read_file(f, raw, limit)
         return _decode(fn, data, raw, limit, repr(path), max_duration)
     return _decode(
         fn, _as_bytes(source), _RAW_AUTO, limit, f"{type(source).__name__} input", max_duration
     )
+
+
+# With a limit, what has been read of a larger file is checked at this size, then at twice it,
+# and so on (af_load_file_ex's AF_PREFIX_CHECK_BYTES).
+_PREFIX_CHECK_BYTES = 1 << 20
+
+
+def _read_file(f: io.BufferedReader, raw: int, limit: int) -> np.ndarray:
+    """The contents of an open file; with a limit, only a prefix once that prefix shows that the
+    file decodes past it (a long WAV, Wave64, SPHERE or raw PCM file is rejected without being
+    read whole). Decoding that prefix fails as the whole file would (af_prefix_too_long)."""
+    st = os.fstat(f.fileno())
+    size = st.st_size
+    if not limit or not stat.S_ISREG(st.st_mode) or size <= _PREFIX_CHECK_BYTES:
+        return np.frombuffer(f.read(), dtype=np.uint8)
+    # Not bytearray(size), which zero-fills (touches) every page up front: numpy's large
+    # allocations come from the OS untouched, so only the pages read are paid for.
+    buf = np.empty(size, np.uint8)
+    n, check = 0, _PREFIX_CHECK_BYTES
+    with memoryview(buf) as view:
+        while n < size:
+            got = f.readinto(view[n : min(check, size)])
+            if not got:
+                break  # truncated meanwhile
+            n += got
+            if n == check < size:
+                known = _ext._prefix_too_long(buf[:n], raw, limit)
+                if known > 0:
+                    return buf[:n]
+                check = check * 2 if known == 0 else size
+    rest = f.read()  # grown meanwhile
+    return np.concatenate((buf[:n], np.frombuffer(rest, np.uint8))) if rest else buf[:n]
 
 
 def _max_samples(max_duration: object) -> int:

@@ -395,7 +395,13 @@ exactly (n output samples pass `max_duration=n / 16000`, n + 1 do not):
   limit, so a rejected file uses at most the decoded size of `max_duration` (for the 30 s FLAC
   above with `max_duration=10`: ~120 MB instead of ~360 MB plus the output).
 
-The file itself is still read whole, so bound the upload size as well.
+A path is read whole, except that with `max_duration` a WAV, Wave64, NIST SPHERE or `.pcm` /
+`.raw` file longer than 1 MiB is checked as it is read (at 1, 2, 4, ... MiB): once the part read
+already holds more audio than the limit, the load stops reading and fails (a 2 h 16 kHz WAV with
+`max_duration=10` reads 1 MiB instead of 230 MB). Only those containers qualify because their
+sample count can only grow with more of the file; AIFF and CAF may replace it with a chunk after
+the samples, and FLAC / MP3 would have to be decoded. Other files, and bytes input, are in memory
+whole, so bound the upload size as well.
 
 Besides that, the process keeps up to 4 resamplers for the rates it loaded most recently
 (each with at most 1 MiB of filters, holding only the bank of the arithmetic path that used
