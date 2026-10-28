@@ -476,13 +476,21 @@ static void test_lfm3_audio(void) {
     int same = 1, gaps = 1, range = 1;
     for (size_t m = 0; m < 128; m++) {
         for (size_t t = 0; t < frames; t++) {
-            same &= memcmp(&a[m * ld + t], &b[t * 128 + m], 4) == 0;
-            range &= a[m * ld + t] >= -2.0f && a[m * ld + t] < 2.0f;
+            const float x = a[m * ld + t], y = b[t * 128 + m];
+            if (same && memcmp(&x, &y, 4) != 0)
+                fprintf(stderr, "lfm3: mel %zu frame %zu: %.9g (channel first) != %.9g\n", m, t,
+                        (double)x, (double)y);
+            if (range && !(x >= -2.0f && x < 2.0f))
+                fprintf(stderr, "lfm3: mel %zu frame %zu: %.9g out of [-2, 2)\n", m, t, (double)x);
+            same &= memcmp(&x, &y, 4) == 0;
+            range &= x >= -2.0f && x < 2.0f;
         }
         for (size_t t = frames; t < ld; t++)
             gaps &= a[m * ld + t] == 7.0f;
     }
-    CHECK(same && gaps && range);
+    CHECK(same);
+    CHECK(gaps);
+    CHECK(range);
     /* the 3 frames past the padded input read only zeros: the floor, (-12 + 4) / 4 */
     CHECK(b[(frames - 1) * 128] == -2.0f && b[(frames - 1) * 128 + 127] == -2.0f);
     CHECK(af_lfm3_audio_log_mel(h, NULL, 0, 1, a, 1) == AF_OK && a[0] == -2.0f);
