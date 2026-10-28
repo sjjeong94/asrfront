@@ -7,9 +7,11 @@ ffmpeg in every supported codec and compares with whisper's exact ffmpeg command
 
 from __future__ import annotations
 
+import os
 import re
 import struct
 import subprocess
+import sys
 import wave
 from pathlib import Path
 
@@ -262,6 +264,24 @@ def test_max_duration_large_finite_values(tmp_path, duration):
     expected = asrfront.load(path)
     np.testing.assert_array_equal(asrfront.load(path, max_duration=duration), expected)
     np.testing.assert_array_equal(asrfront.load(path.read_bytes(), max_duration=duration), expected)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a sparse file")
+def test_max_duration_file_larger_than_memory(tmp_path):
+    """A 1 TiB streamed WAV (sparse; more than RAM + swap) is rejected from its prefix: no
+    buffer of the file's size is allocated first (that raised MemoryError)."""
+    path = write_wav(tmp_path / "huge.wav", noise_s16(100))
+    data = bytearray(path.read_bytes())
+    data[40:44] = b"\xff\xff\xff\xff"  # data chunk size: streamed, read to the end
+    path.write_bytes(bytes(data))
+    try:
+        os.truncate(path, 1 << 40)
+    except OSError:
+        pytest.skip("no sparse files here")
+    with pytest.raises(ValueError, match="longer than max_duration"):
+        asrfront.load(path, max_duration=60)
+    with pytest.raises(ValueError, match="longer than max_duration"):
+        asrfront.info(path, max_duration=60)
 
 
 def test_max_duration_reads_long_files_partly(tmp_path):

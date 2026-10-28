@@ -3,6 +3,7 @@
 
 #include "asrfront.h"
 #include "fft.h"
+#include "fpmode.h"
 #include "kernels.h"
 #include "melbank.h"
 
@@ -135,8 +136,8 @@ static void normalize_rows(const af_kernels *k, float *out, size_t n_rows, size_
  * n_virt / hop frames of the reflect-padded centered STFT, the last one dropped. Mel row m
  * goes to out + m * ld (ld >= the frame count); with channel_last, frame t goes to
  * out + t * ld (ld >= n_mels). */
-static void log_mel_virtual(af_whisper *h, const float *audio, size_t n_in, size_t n_virt,
-                            float *out, size_t ld) {
+static void log_mel_body(af_whisper *h, const float *audio, size_t n_in, size_t n_virt, float *out,
+                         size_t ld) {
     const af_kernels *k = h->k;
     const size_t n_frames = n_virt / WHISPER_HOP;
     const int n_mels = h->cfg.n_mels;
@@ -206,6 +207,13 @@ static void log_mel_virtual(af_whisper *h, const float *audio, size_t n_in, size
             row[t] = silence;
         k->whisper_normalize(row + s1, n_frames - s1, gmax);
     }
+}
+
+static void log_mel_virtual(af_whisper *h, const float *audio, size_t n_in, size_t n_virt,
+                            float *out, size_t ld) {
+    const unsigned fp = af_ftz_enter();
+    log_mel_body(h, audio, n_in, n_virt, out, ld);
+    af_ftz_leave(fp);
 }
 
 /* Elements between the rows of a dense output: frames, or mels with channel_last. */

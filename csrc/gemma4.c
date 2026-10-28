@@ -5,6 +5,7 @@
 
 #include "asrfront.h"
 #include "fft.h"
+#include "fpmode.h"
 #include "kernels.h"
 #include "melbank.h"
 
@@ -98,6 +99,7 @@ static int log_mel(af_gemma4 *h, const float *audio, size_t n_samples, size_t n_
         return AF_EINVAL;
     size_t valid = af_gemma4_valid_frames(n_samples);
     valid = valid < n_frames ? valid : n_frames;
+    const unsigned fp = af_ftz_enter();
     if (valid > 0) { /* then n_samples > G4_PAD */
         memset(h->edge, 0, G4_PAD * sizeof(float));
         memcpy(h->edge + G4_PAD, audio, G4_PAD * sizeof(float));
@@ -116,6 +118,7 @@ static int log_mel(af_gemma4 *h, const float *audio, size_t n_samples, size_t n_
                 dst[l] = row[l];
         }
     }
+    af_ftz_leave(fp);
     if (n_frames == valid) /* the padding's frames, if any, are masked to zero */
         return AF_OK;
     if (channel_last) {

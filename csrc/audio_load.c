@@ -418,7 +418,10 @@ int af_load_file_ex(const char *path_utf8, size_t max_samples, float **out, size
     int rc = AF_OK;
     for (;;) {
         if (size == cap) {
-            size_t ncap = cap ? cap * 2 : expect ? expect + 1 : (size_t)1 << 20;
+            size_t ncap = expect && cap <= expect ? expect + 1 : cap ? cap * 2 : (size_t)1 << 20;
+            /* Not past the next check: a file larger than memory (RAM + swap without
+             * overcommit) must still fail with AF_ETOOLONG from its prefix, not AF_ENOMEM. */
+            ncap = ncap < check ? ncap : check;
             uint8_t *nb = ncap > cap ? realloc(buf, ncap) : NULL;
             if (!nb) {
                 rc = AF_ENOMEM;

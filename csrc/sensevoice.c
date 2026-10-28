@@ -6,6 +6,7 @@
 
 #include "asrfront.h"
 #include "fft.h"
+#include "fpmode.h"
 #include "kernels.h"
 #include "melbank.h"
 
@@ -198,7 +199,9 @@ static void fbank_raw(af_sensevoice *h, const float *audio, size_t n_frames, flo
 int af_sensevoice_fbank_raw(af_sensevoice *h, const float *audio, size_t n_samples, float *out) {
     if (!h || !out || (!audio && n_samples))
         return AF_EINVAL;
+    const unsigned fp = af_ftz_enter();
     fbank_raw(h, audio, af_sensevoice_raw_frames(h, n_samples), out);
+    af_ftz_leave(fp);
     return AF_OK;
 }
 
@@ -271,10 +274,12 @@ int af_sensevoice_fbank(af_sensevoice *h, const float *audio, size_t n_samples, 
     const size_t dim = af_sensevoice_feat_dim(h);
     h->rng = splitmix64(h->cfg.seed); /* as in fbank_raw(): every frame, in order */
     size_t done = 0;                  /* raw frames computed; a multiple of AF_VL until the end */
+    const unsigned fp = af_ftz_enter();
     for (size_t i = 0; i < n_out; i++) {
         frames_for_row(h, audio, 0, &done, n_raw, i, last);
         lfr_row(h, i, last, out + i * dim);
     }
+    af_ftz_leave(fp);
     return AF_OK;
 }
 
@@ -361,10 +366,12 @@ static size_t emit_rows(af_sensevoice_stream *s, int end, float *out) {
     const ptrdiff_t last = (ptrdiff_t)n_raw - 1; /* rows_ready() rows never reach it */
     const size_t dim = af_sensevoice_feat_dim(h);
     size_t k = 0;
+    const unsigned fp = af_ftz_enter();
     for (; s->next_row < n_rows; s->next_row++, k++) {
         frames_for_row(h, s->buf, s->base, &s->done, n_raw, s->next_row, last);
         lfr_row(h, s->next_row, last, out + k * dim);
     }
+    af_ftz_leave(fp);
     return k;
 }
 

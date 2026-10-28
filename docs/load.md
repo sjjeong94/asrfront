@@ -398,7 +398,9 @@ exactly (n output samples pass `max_duration=n / 16000`, n + 1 do not):
 A path is read whole, except that with `max_duration` a WAV, Wave64, NIST SPHERE or `.pcm` /
 `.raw` file longer than 1 MiB is checked as it is read (at 1, 2, 4, ... MiB): once the part read
 already holds more audio than the limit, the load stops reading and fails (a 2 h 16 kHz WAV with
-`max_duration=10` reads 1 MiB instead of 230 MB). Only those containers qualify because their
+`max_duration=10` reads 1 MiB instead of 230 MB). The read buffer grows with the checks rather
+than taking the file's size up front, so a file larger than memory still fails with the limit
+error, not an out-of-memory one. Only those containers qualify because their
 sample count can only grow with more of the file; AIFF and CAF may replace it with a chunk after
 the samples, and FLAC / MP3 would have to be decoded. Other files, and bytes input, are in memory
 whole, so bound the upload size as well.

@@ -5,6 +5,7 @@
 
 #include "asrfront.h"
 #include "fft.h"
+#include "fpmode.h"
 #include "kernels.h"
 #include "melbank.h"
 
@@ -88,6 +89,7 @@ static int log_mel(af_lfm3_audio *h, const float *audio, size_t n_samples, size_
     if (n_frames > SIZE_MAX / LFM3_HOP) /* frame starts must not overflow */
         return AF_EINVAL;
     const af_kernels *k = h->k;
+    const unsigned fp = af_ftz_enter();
     for (size_t t0 = 0; t0 < n_frames; t0 += AF_VL) {
         const int count = n_frames - t0 < AF_VL ? (int)(n_frames - t0) : AF_VL;
         const float *src[AF_VL];
@@ -111,6 +113,7 @@ static int log_mel(af_lfm3_audio *h, const float *audio, size_t n_samples, size_
                 dst[l] = row[l];
         }
     }
+    af_ftz_leave(fp);
     return AF_OK;
 }
 

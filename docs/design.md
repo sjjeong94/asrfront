@@ -71,6 +71,11 @@ algorithms themselves are specified in [`whisper.md`](whisper.md),
   variant.
 - `log`/`log10` use a branch-free vectorized Cephes polynomial (≈ 1 ulp) instead of libm, which
   alone cost 1.2 ms per 30 s.
+- **Subnormals are flushed** (FTZ/DAZ, x86 only) for the duration of each frontend call, and the
+  caller's mode restored (`csrc/fpmode.h`): float input of tiny amplitude (≲ 1e-17) makes FFT
+  and mel intermediates subnormal, which x86 handles in microcode (8-16x slower per call). Such
+  values lie far below every log floor, so the outputs are bit-identical either way. The
+  resampler keeps IEEE subnormals, as ffmpeg does.
 
 ## Python binding
 

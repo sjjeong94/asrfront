@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "asrfront.h"
+#include "fpmode.h"
 #include "kernels.h"
 
 extern const af_kernels af_kernels_generic, af_kernels_scalar;
@@ -498,6 +499,45 @@ static void test_lfm3_audio(void) {
     free(b);
 }
 
+/* The frontends flush subnormals while they run (fpmode.h) and give the caller's floating-point
+ * mode back unchanged, whether or not it already flushes. */
+static void test_fp_mode(void) {
+#ifdef AF_FTZ_BITS
+    enum { N = 16000 };
+    static float a[N], out[128 * 3000];
+    for (int i = 0; i < N; i++) /* subnormal FFT intermediates */
+        a[i] = (float)((i * 7919) % 2001 - 1000) * 1e-23f;
+    af_whisper_config wc;
+    af_whisper_default_config(&wc);
+    af_whisper *w = NULL;
+    af_sensevoice_config sc;
+    af_sensevoice_default_config(&sc);
+    af_sensevoice *sv = NULL;
+    af_gemma4 *g = NULL;
+    af_lfm3_audio *l = NULL;
+    CHECK(af_whisper_create(&wc, &w) == AF_OK && af_sensevoice_create(&sc, &sv) == AF_OK &&
+          af_gemma4_create(&g) == AF_OK && af_lfm3_audio_create(&l) == AF_OK);
+    const unsigned saved = _mm_getcsr();
+    for (int ftz = 0; ftz < 2 && w && sv && g && l; ftz++) {
+        /* compared without the sticky exception flags (bits 0-5) */
+        const unsigned mode = (ftz ? saved | AF_FTZ_BITS : saved & ~AF_FTZ_BITS) & ~0x3Fu;
+        _mm_setcsr(mode);
+        CHECK(af_whisper_log_mel(w, a, N, out) == AF_OK && (_mm_getcsr() & ~0x3Fu) == mode);
+        CHECK(af_sensevoice_fbank(sv, a, N, out) == AF_OK && (_mm_getcsr() & ~0x3Fu) == mode);
+        CHECK(af_gemma4_log_mel(g, a, N, af_gemma4_out_frames(N), out) == AF_OK &&
+              (_mm_getcsr() & ~0x3Fu) == mode);
+        CHECK(af_lfm3_audio_log_mel(l, a, N, af_lfm3_audio_out_frames(N), out,
+                                    af_lfm3_audio_out_frames(N)) == AF_OK &&
+              (_mm_getcsr() & ~0x3Fu) == mode);
+    }
+    _mm_setcsr(saved);
+    af_whisper_destroy(w);
+    af_sensevoice_destroy(sv);
+    af_gemma4_destroy(g);
+    af_lfm3_audio_destroy(l);
+#endif
+}
+
 int main(void) {
     test_whisper();
     test_whisper_silence_skip();
@@ -511,6 +551,7 @@ int main(void) {
     test_lfm3_audio();
     test_kernels_extra();
     test_misc();
+    test_fp_mode();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

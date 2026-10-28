@@ -118,21 +118,24 @@ def _read_file(f: io.BufferedReader, raw: int, limit: int) -> np.ndarray:
     size = st.st_size
     if not limit or not stat.S_ISREG(st.st_mode) or size <= _PREFIX_CHECK_BYTES:
         return np.frombuffer(f.read(), dtype=np.uint8)
-    # Not bytearray(size), which zero-fills (touches) every page up front: numpy's large
-    # allocations come from the OS untouched, so only the pages read are paid for.
-    buf = np.empty(size, np.uint8)
+    # Allocated up to the next check only, grown as checks pass: a file larger than memory
+    # (RAM + swap without overcommit) must still be rejected from its prefix, not fail to
+    # allocate. resize() reallocates in place (no view of buf is alive then).
     n, check = 0, _PREFIX_CHECK_BYTES
-    with memoryview(buf) as view:
-        while n < size:
-            got = f.readinto(view[n : min(check, size)])
-            if not got:
-                break  # truncated meanwhile
-            n += got
-            if n == check < size:
-                known = _ext._prefix_too_long(buf[:n], raw, limit)
-                if known > 0:
-                    return buf[:n]
-                check = check * 2 if known == 0 else size
+    buf = np.empty(min(check, size), np.uint8)
+    while n < size:
+        if n == buf.shape[0]:
+            buf.resize(min(check, size), refcheck=False)
+        with memoryview(buf) as view:
+            got = f.readinto(view[n : buf.shape[0]])
+        if not got:
+            break  # truncated meanwhile
+        n += got
+        if n == check < size:
+            known = _ext._prefix_too_long(buf[:n], raw, limit)
+            if known > 0:
+                return buf[:n]
+            check = check * 2 if known == 0 else size
     rest = f.read()  # grown meanwhile
     return np.concatenate((buf[:n], np.frombuffer(rest, np.uint8))) if rest else buf[:n]
 

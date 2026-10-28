@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import platform
 
 import numpy as np
 import pytest
@@ -583,3 +584,54 @@ def test_batch_after_fork(sigs):
         os._exit(0 if ok else 1)
     _, status = os.waitpid(pid, 0)
     assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+
+# ---------------------------------------------------------------------------------------------
+# Subnormal intermediates (fpmode.h)
+# ---------------------------------------------------------------------------------------------
+
+
+def _frontend_calls():
+    from asrfront import gemma4, lfm3_audio, qwen3_asr, sensevoice
+
+    return {
+        "whisper": lambda a: log_mel(a, pad_or_trim=False),
+        "qwen3_asr": qwen3_asr.log_mel,
+        "sensevoice": sensevoice.fbank,
+        "gemma4": gemma4.log_mel,
+        "lfm3_audio": lfm3_audio.log_mel,
+    }
+
+
+@pytest.mark.parametrize("name", list(_frontend_calls()))
+def test_fp_mode_restored(name):
+    """The frontends flush subnormals only while they run: numpy's float32 arithmetic in the
+    calling thread still produces subnormals afterwards."""
+    tiny = np.full(16000, 1e-23, np.float32)
+    _frontend_calls()[name](tiny)
+    assert np.float32(1e-30) * np.float32(1e-10) != 0  # 1e-40: subnormal, not flushed
+
+
+@pytest.mark.skipif(
+    platform.machine().lower() not in ("x86_64", "amd64"), reason="flushing is x86-only"
+)
+@pytest.mark.parametrize("name", list(_frontend_calls()))
+def test_tiny_input_not_slow(name):
+    """Audio of tiny amplitude makes FFT / mel intermediates subnormal, which x86 computes in
+    microcode (8-16x slower before the frontends flushed them)."""
+    import time
+
+    fn = _frontend_calls()[name]
+    noise = np.random.default_rng(0).standard_normal(16000 * 10).astype(np.float32)
+
+    def best(a: np.ndarray) -> float:
+        times = []
+        for _ in range(5):
+            t = time.perf_counter()
+            fn(a)
+            times.append(time.perf_counter() - t)
+        return min(times)
+
+    normal = best(noise * np.float32(0.1))
+    for amp in (1e-20, 1e-25, 1e-36):
+        assert best(noise * np.float32(amp)) < 3 * normal, amp

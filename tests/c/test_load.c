@@ -1,8 +1,14 @@
 /* Audio loading tests on hand-crafted byte buffers (no framework). Comparisons against ffmpeg
  * itself are in tests/python/test_load.py. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L /* fileno, ftruncate */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h> /* ftruncate */
+#endif
 
 #include "asrfront.h"
 #include "audio.h"
@@ -659,6 +665,21 @@ static void test_file(void) {
         CHECK(af_load_file_ex(path, 0, &a, &n, err, sizeof err) == AF_OK && n == n_big);
         af_audio_free(a);
     }
+#if !defined(_WIN32) && SIZE_MAX > 0xFFFFFFFFu
+    /* A sparse 1 TiB streamed WAV (more than RAM + swap): rejected from its prefix, without
+     * allocating a buffer for the whole file first (that failed with AF_ENOMEM). */
+    f = fopen(path, "wb");
+    if (f) {
+        buf_t h;
+        wav_head(&h, 1, 1, 16000, 16, 0);
+        put(&h, "data\xFF\xFF\xFF\xFF", 8);
+        fwrite(h.b, 1, h.n, f);
+        const int sparse = fflush(f) == 0 && ftruncate(fileno(f), (off_t)1 << 40) == 0;
+        fclose(f);
+        if (sparse)
+            CHECK(af_load_file_ex(path, 16000 * 60, &a, &n, err, sizeof err) == AF_ETOOLONG && !a);
+    }
+#endif
     f = fopen(path, "wb");
     if (f) {
         fwrite("RIFF\0\0\0\0WAVEfmt \2\0\0\0", 1, 18, f); /* truncated fmt chunk */
