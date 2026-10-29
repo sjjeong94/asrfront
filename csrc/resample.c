@@ -566,8 +566,8 @@ void af_resample_s16(const af_resampler *r, const int32_t *x, size_t n, int32_t 
     af_resample_s16_range(r, x, 0, n, 0, af_resampler_out_len(r, n), y);
 }
 
-void af_resample_s16_range(const af_resampler *r, const int32_t *x, size_t x0, size_t n,
-                           size_t k0, size_t k1, int32_t *y) {
+void af_resample_s16_range(const af_resampler *r, const int32_t *x, size_t x0, size_t n, size_t k0,
+                           size_t k1, int32_t *y) {
     const int nt = r->n_taps;
     int32_t edge_[MAX_WIDTH];
     pos_t s;

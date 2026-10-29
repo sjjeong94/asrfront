@@ -57,8 +57,8 @@ void af_resample_f32_range(const af_resampler *r, const float *x, size_t x0, siz
 /* The same for af_resample_f64() and af_resample_s16(). */
 void af_resample_f64_range(const af_resampler *r, const double *x, size_t x0, size_t n, size_t k0,
                            size_t k1, double *y);
-void af_resample_s16_range(const af_resampler *r, const int32_t *x, size_t x0, size_t n,
-                           size_t k0, size_t k1, int32_t *y);
+void af_resample_s16_range(const af_resampler *r, const int32_t *x, size_t x0, size_t n, size_t k0,
+                           size_t k1, int32_t *y);
 /* Input samples [*lo, *hi) that outputs [k0, k1) read (mirrored edges included), by any of the
  * _range functions. */
 void af_resampler_span(const af_resampler *r, size_t n, size_t k0, size_t k1, size_t *lo,
