@@ -282,21 +282,32 @@ static void mono_direct(const af_decoded *d, path_t path, float *out) {
 
 #define PIPE_BLOCK 2048 /* outputs per block of the extract -> resample -> mix pipeline */
 
-/* Float path with resampling, or any path without: block by block, so that the per-channel
- * input and output blocks stay in cache instead of going through full-length buffers. */
+/* Outputs [k0, k1) of channel input tmp (samples [lo, ...) of n) resampled on the path. */
+static void resample_range(path_t path, const af_resampler *rs, const void *tmp, size_t lo,
+                           size_t n, size_t k0, size_t k1, void *dst) {
+    if (path == PATH_FLOAT)
+        af_resample_f32_range(rs, tmp, lo, n, k0, k1, dst);
+    else if (path == PATH_DOUBLE)
+        af_resample_f64_range(rs, tmp, lo, n, k0, k1, dst);
+    else
+        af_resample_s16_range(rs, tmp, lo, n, k0, k1, dst);
+}
+
+/* Block by block, so that the per-channel input and output blocks stay in cache, and memory
+ * beyond the output stays a few blocks, instead of going through full-length buffers. */
 static int to_mono_blocked(const af_decoded *d, path_t path, const af_resampler *rs,
                            const double *w, size_t m, float *res) {
     const int ch = d->channels;
     const size_t n = d->n_frames, es = elem_size[path];
     size_t tmp_len = 0;
-    if (rs) /* path is PATH_FLOAT */
+    if (rs)
         for (size_t k0 = 0; k0 < m; k0 += PIPE_BLOCK) {
             size_t lo, hi;
             af_resampler_span(rs, n, k0, k0 + (m - k0 < PIPE_BLOCK ? m - k0 : PIPE_BLOCK), &lo,
                               &hi);
             tmp_len = hi - lo > tmp_len ? hi - lo : tmp_len;
         }
-    float *tmp = rs ? malloc(tmp_len > 0 ? tmp_len * sizeof(float) : 1) : NULL;
+    void *tmp = rs ? malloc(tmp_len > 0 ? tmp_len * es : 1) : NULL;
     char *blk = malloc((size_t)ch * PIPE_BLOCK * es);
     if ((rs && !tmp) || !blk) {
         free(tmp);
@@ -313,7 +324,7 @@ static int to_mono_blocked(const af_decoded *d, path_t path, const af_resampler 
             af_resampler_span(rs, n, k0, k1, &lo, &hi);
             for (int c = 0; c < ch; c++) {
                 extract(d, path, c, lo, hi - lo, tmp);
-                af_resample_f32_range(rs, tmp, lo, n, k0, k1, chan[c]);
+                resample_range(path, rs, tmp, lo, n, k0, k1, chan[c]);
             }
         } else {
             for (int c = 0; c < ch; c++)
@@ -350,56 +361,17 @@ int af_audio_to_mono(const af_decoded *d, int sr_out, float **out, size_t *n_out
     if (resample && (rc = af_resampler_acquire(d->sample_rate, sr_out, banks, &rs)) != AF_OK)
         return rc;
     size_t m = resample ? af_resampler_out_len(rs, n) : n;
-    const size_t es = elem_size[path];
     double w[AF_MAX_CHANNELS];
     af_downmix_weights(d->layout, ch, w);
 
-    if (!resample || path == PATH_FLOAT) {
-        float *res = malloc(m > 0 ? m * sizeof(float) : 1);
-        rc = res ? to_mono_blocked(d, path, rs, w, m, res) : AF_ENOMEM;
-        if (rc == AF_OK) {
-            *out = res;
-            *n_out = m;
-        } else {
-            free(res);
-        }
-        af_resampler_release(rs);
-        return rc;
-    }
-
-    /* Resampled double and int16 paths: whole channels at a time. */
-    void *chan[AF_MAX_CHANNELS] = {0};
-    void *tmp = malloc(n > 0 ? n * es : 1);
-    if (!tmp)
-        rc = AF_ENOMEM;
-    for (int c = 0; c < ch && rc == AF_OK; c++) {
-        if (!(chan[c] = malloc(m > 0 ? m * es : 1))) {
-            rc = AF_ENOMEM;
-            break;
-        }
-        extract(d, path, c, 0, n, tmp);
-        if (path == PATH_DOUBLE)
-            af_resample_f64(rs, tmp, n, chan[c]);
-        else
-            af_resample_s16(rs, tmp, n, chan[c]);
-    }
+    float *res = malloc(m > 0 ? m * sizeof(float) : 1);
+    rc = res ? to_mono_blocked(d, path, rs, w, m, res) : AF_ENOMEM;
     if (rc == AF_OK) {
-        /* The output reuses channel 0's buffer (one large allocation and its page faults
-         * less): mix() reads every channel at i before writing out[i], and float elements
-         * are never larger than the working type. */
-        float *res = chan[0];
-        mix(path, chan, ch, w, m, res);
-        if (es > sizeof(float) && m > 0) {
-            float *shrunk = realloc(res, m * sizeof(float));
-            res = shrunk ? shrunk : res;
-        }
-        chan[0] = NULL;
         *out = res;
         *n_out = m;
+    } else {
+        free(res);
     }
-    for (int c = 0; c < ch; c++)
-        free(chan[c]);
-    free(tmp);
     af_resampler_release(rs);
     return rc;
 }

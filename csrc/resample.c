@@ -417,18 +417,27 @@ static size_t mirror(ptrdiff_t i, size_t n) {
     return (size_t)(i < 0 ? 0 : i > nn - 1 ? nn - 1 : i);
 }
 
-/* Gather the N inputs of output position b into win (mirrored at the edges). */
-#define GATHER(win, x, n, b, n_taps)                                                               \
+/* Gather the N inputs of output position b into win (mirrored at the edges), from x holding
+ * samples [x0, ...) of a signal of n samples. */
+#define GATHER(win, x, x0, n, b, n_taps)                                                           \
     do {                                                                                           \
         ptrdiff_t first_ = (b) - (n_taps) / 2 + 1;                                                 \
         if (first_ >= 0 && first_ + (n_taps) <= (ptrdiff_t)(n)) {                                  \
-            (win) = (x) + first_;                                                                  \
+            (win) = (x) + (first_ - (ptrdiff_t)(x0));                                              \
         } else {                                                                                   \
             for (int i_ = 0; i_ < (n_taps); i_++)                                                  \
-                edge_[i_] = (x)[mirror(first_ + i_, (n))];                                         \
+                edge_[i_] = (x)[mirror(first_ + i_, (n)) - (x0)];                                  \
             (win) = edge_;                                                                         \
         }                                                                                          \
     } while (0)
+
+/* Position of output k0, as pos_next() reaches it from 0. */
+static void pos_at(const af_resampler *r, size_t k0, pos_t *s) {
+    pos_init(r, s);
+    const uint64_t t0 = (uint64_t)k0 * r->p;
+    s->b = (ptrdiff_t)(t0 / r->q);
+    s->rem = t0 % r->q;
+}
 
 /* First input sample read by output k (before mirroring): b_k - N/2 + 1. */
 static ptrdiff_t first_read(const af_resampler *r, size_t k) {
@@ -473,10 +482,7 @@ void af_resample_f32_range(const af_resampler *r, const float *x, size_t x0, siz
         k_hi = k_hi < k1 ? k_hi : k1;
     }
     pos_t s;
-    pos_init(r, &s);
-    const uint64_t t0 = (uint64_t)k0 * r->p;
-    s.b = (ptrdiff_t)(t0 / r->q);
-    s.rem = t0 % r->q;
+    pos_at(r, k0, &s);
     for (size_t k = k0; k < k1; k++, pos_next(r, &s)) {
         if (k == k_lo && k_lo < k_hi) {
             kern->resample_run(r->bankf, wd, x + (s.b - nt / 2 + 1 - (ptrdiff_t)x0), (int)s.rem,
@@ -518,15 +524,19 @@ void af_resample_f32(const af_resampler *r, const float *x, size_t n, float *y) 
 }
 
 void af_resample_f64(const af_resampler *r, const double *x, size_t n, double *y) {
-    size_t n_out = af_resampler_out_len(r, n);
+    af_resample_f64_range(r, x, 0, n, 0, af_resampler_out_len(r, n), y);
+}
+
+void af_resample_f64_range(const af_resampler *r, const double *x, size_t x0, size_t n, size_t k0,
+                           size_t k1, double *y) {
     const int nt = r->n_taps;
     double edge_[MAX_WIDTH];
     pos_t s;
-    pos_init(r, &s);
-    for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {
+    pos_at(r, k0, &s);
+    for (size_t k = k0; k < k1; k++, pos_next(r, &s)) {
         pos_phase(r, &s);
         const double *win;
-        GATHER(win, x, n, s.b, nt);
+        GATHER(win, x, x0, n, s.b, nt);
         const double *h1 = r->bank + (size_t)s.m * nt;
         double acc = 0.0;
         if (r->exact) {
@@ -543,7 +553,7 @@ void af_resample_f64(const af_resampler *r, const double *x, size_t n, double *y
                 acc = acc + p;
             }
         }
-        y[k] = acc;
+        y[k - k0] = acc;
     }
 }
 
@@ -553,15 +563,19 @@ static int64_t floor_div(int64_t a, int64_t b) { /* b > 0 */
 }
 
 void af_resample_s16(const af_resampler *r, const int32_t *x, size_t n, int32_t *y) {
-    size_t n_out = af_resampler_out_len(r, n);
+    af_resample_s16_range(r, x, 0, n, 0, af_resampler_out_len(r, n), y);
+}
+
+void af_resample_s16_range(const af_resampler *r, const int32_t *x, size_t x0, size_t n,
+                           size_t k0, size_t k1, int32_t *y) {
     const int nt = r->n_taps;
     int32_t edge_[MAX_WIDTH];
     pos_t s;
-    pos_init(r, &s);
-    for (size_t k = 0; k < n_out; k++, pos_next(r, &s)) {
+    pos_at(r, k0, &s);
+    for (size_t k = k0; k < k1; k++, pos_next(r, &s)) {
         pos_phase(r, &s);
         const int32_t *win;
-        GATHER(win, x, n, s.b, nt);
+        GATHER(win, x, x0, n, s.b, nt);
         const int32_t *h1 = r->bankq + (size_t)s.m * nt;
         int64_t acc = 0;
         for (int i = 0; i < nt; i++)
@@ -574,6 +588,6 @@ void af_resample_s16(const af_resampler *r, const int32_t *x, size_t n, int32_t 
             acc += floor_div((acc2 - acc) * (int64_t)s.fr, (int64_t)r->q);
         }
         int64_t v = floor_div(acc + 16384, 32768);
-        y[k] = (int32_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+        y[k - k0] = (int32_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
     }
 }

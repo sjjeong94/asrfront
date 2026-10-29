@@ -2,6 +2,28 @@
 
 Qwen3-ASR features (`asrfront.qwen3_asr`): see [`qwen3_asr.md`](qwen3_asr.md#performance).
 
+## Apple M1 dither and blocked int16 / double resampling (2026-10-29)
+
+Baseline: commit `23f1748`. Same machine as below (Apple M1, macOS 26.5.2 arm64, Apple Clang,
+Python 3.12). Best of 20–30 calls through the Python API.
+
+- **SenseVoice dither**: Box–Muller uses in-house, branch-free `ln` / `sin` / `cos` instead of
+  four libm calls per pair, so the per-frame loop vectorizes (a `switch` on the random quadrant
+  cost about half the gain in a first version: an unpredictable branch). The
+  features for every tested seed are bit for bit unchanged ([`sensevoice.md`](sensevoice.md#dither)).
+  The remaining cost is mostly the serial xorshift64* chain (~4 ms per 30 s), which cannot
+  change without changing every seed's output.
+- **Resampled u8 (int16 path) and f64 (double path) audio** is resampled and downmixed block
+  by block, like the float path, instead of through full-length per-channel buffers. Output
+  is bit for bit unchanged (u8 and f64, 1 / 2 / 6 channels, 7 input rates, 5 lengths).
+
+| Measurement | Before | After |
+|---|---:|---:|
+| `sensevoice.fbank`, 30 s, `dither=0` | 3.17 ms | 3.16 ms |
+| `sensevoice.fbank`, 30 s, `dither=1.0` | 21.18 ms | 14.87 ms |
+| `load`, 600 s 48 kHz 6-channel u8 WAV: peak memory beyond input | 220 MiB | 37 MiB (= the output) |
+| `load`, 60 s 48 kHz 6-channel u8 WAV: time | 93.5 ms | 94.7 ms |
+
 ## Apple M1 resampler and FFT updates (2026-10-20)
 
 Baseline: commit `6ec1b7f`. Environment: Apple M1 (4 performance + 4 efficiency cores),

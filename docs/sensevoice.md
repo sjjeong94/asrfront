@@ -240,6 +240,13 @@ generator (splitmix64-seeded xorshift64*, Box–Muller), **reseeded from `seed` 
 so the same input and seed always produce the same output. It does not reproduce torch's
 random numbers.
 
+Box–Muller's `ln` and `sin` / `cos` are computed in-house in double precision (`ln` by the
+`atanh` series after splitting off the exponent, `sin` / `cos` of `2πu` by exact quadrant
+reduction and Taylor series), using only `+ − × ÷` and `sqrt`, which IEEE 754 rounds
+correctly. The noise for a seed therefore does not depend on the platform's libm, and the loop
+over a frame vectorizes. Against macOS libm the two differ by at most 3e-16 (relative, `ln`) and
+7e-16 (absolute, `sin` / `cos`); over 10⁸ noise samples, none changed once rounded to float32.
+
 ## Edge cases
 
 | Input | FunASR | `asrfront.sensevoice.fbank` |

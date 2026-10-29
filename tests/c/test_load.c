@@ -837,6 +837,68 @@ static void test_resampler_limits(void) {
     af_resampler_destroy(f32);
 }
 
+/* The _range functions over blocks give the whole-signal outputs bit for bit, reading only the
+ * span af_resampler_span() names: each block's input is a copy of exactly that span, so a read
+ * outside it is caught (ASan) or computes from the wrong samples. */
+static void test_resampler_ranges(void) {
+    static const int rates[] = {8000, 22050, 44100, 44101, 48000, 96000, 383999};
+    static const size_t lens[] = {1, 7, 300, 2001, 20000};
+    static const size_t blocks[] = {1, 37, 2048};
+    for (size_t ri = 0; ri < sizeof rates / sizeof *rates; ri++) {
+        af_resampler *r = NULL;
+        CHECK(af_resampler_create(rates[ri], 16000, &r) == AF_OK);
+        if (!r)
+            continue;
+        for (size_t li = 0; li < sizeof lens / sizeof *lens; li++) {
+            const size_t n = lens[li], m = af_resampler_out_len(r, n);
+            float *xf = malloc(n * sizeof *xf), *yf = malloc((m + 1) * sizeof *yf);
+            double *xd = malloc(n * sizeof *xd), *yd = malloc((m + 1) * sizeof *yd);
+            int32_t *xq = malloc(n * sizeof *xq), *yq = malloc((m + 1) * sizeof *yq);
+            for (size_t i = 0; i < n; i++) {
+                xd[i] = (double)((long)(i * 7919 % 2001) - 1000) / 1000.0;
+                xf[i] = (float)xd[i];
+                xq[i] = (int32_t)(xd[i] * 32767.0);
+            }
+            af_resample_f32(r, xf, n, yf);
+            af_resample_f64(r, xd, n, yd);
+            af_resample_s16(r, xq, n, yq);
+            for (size_t bi = 0; bi < sizeof blocks / sizeof *blocks; bi++) {
+                int same = 1;
+                for (size_t k0 = 0; k0 < m; k0 += blocks[bi]) {
+                    const size_t k1 = m - k0 < blocks[bi] ? m : k0 + blocks[bi];
+                    size_t lo, hi;
+                    af_resampler_span(r, n, k0, k1, &lo, &hi);
+                    float *sf = malloc((hi - lo) * sizeof *sf), of[2048];
+                    double *sd = malloc((hi - lo) * sizeof *sd), od[2048];
+                    int32_t *sq = malloc((hi - lo) * sizeof *sq), oq[2048];
+                    memcpy(sf, xf + lo, (hi - lo) * sizeof *sf);
+                    memcpy(sd, xd + lo, (hi - lo) * sizeof *sd);
+                    memcpy(sq, xq + lo, (hi - lo) * sizeof *sq);
+                    af_resample_f32_range(r, sf, lo, n, k0, k1, of);
+                    af_resample_f64_range(r, sd, lo, n, k0, k1, od);
+                    af_resample_s16_range(r, sq, lo, n, k0, k1, oq);
+                    same &= memcmp(of, yf + k0, (k1 - k0) * sizeof *of) == 0 &&
+                            memcmp(od, yd + k0, (k1 - k0) * sizeof *od) == 0 &&
+                            memcmp(oq, yq + k0, (k1 - k0) * sizeof *oq) == 0;
+                    free(sf);
+                    free(sd);
+                    free(sq);
+                }
+                if (!same)
+                    fprintf(stderr, "  rate %d, n %zu, block %zu\n", rates[ri], n, blocks[bi]);
+                CHECK(same);
+            }
+            free(xf);
+            free(yf);
+            free(xd);
+            free(yd);
+            free(xq);
+            free(yq);
+        }
+        af_resampler_destroy(r);
+    }
+}
+
 int main(void) {
     test_wav_s16();
     test_wav_formats();
@@ -856,6 +918,7 @@ int main(void) {
     test_probe();
     test_resampler_cache();
     test_resampler_limits();
+    test_resampler_ranges();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

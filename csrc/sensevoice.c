@@ -149,15 +149,98 @@ static double rng_uniform(unsigned long long *s) { /* (0, 1] */
     return ((double)(r >> 11) + 1.0) / 9007199254740992.0;
 }
 
-/* x[i * stride] += dither * N(0, 1), i < n */
+/* Box-Muller without libm: ln and sin / cos below use only + - * / (and sqrt for the radius),
+ * which IEEE 754 rounds correctly, so the noise for a seed is the same on every platform
+ * (libm's log / sin / cos differ by an ulp between implementations), and the loops over a
+ * frame vectorize instead of making four libm calls per pair. Both are accurate to a few ulp
+ * in double, far below the float the noise is added as. */
+
+/* ln(u) for u in (0, 1], a multiple of 2^-53: u = m 2^e with m in [sqrt(1/2), sqrt(2)], then
+ * ln(m) = 2 atanh(s), s = (m - 1) / (m + 1), |s| <= 0.1716, by its series to s^23. */
+static double ln_unit(double u) {
+    uint64_t bits;
+    memcpy(&bits, &u, sizeof bits);
+    const uint64_t mant = bits & 0x000FFFFFFFFFFFFFull;
+    const uint64_t big = mant > 0x6A09E667F3BCCull; /* m > sqrt(2) in [1, 2): halve it */
+    const int64_t e = (int64_t)(bits >> 52) - 1023 + (int64_t)big;
+    const uint64_t mbits = mant | ((1023 - big) << 52);
+    double m;
+    memcpy(&m, &mbits, sizeof m);
+    const double f = m - 1.0; /* exact */
+    const double s = f / (2.0 + f), z = s * s;
+    double p = 1.0 / 23.0;
+    p = p * z + 1.0 / 21.0;
+    p = p * z + 1.0 / 19.0;
+    p = p * z + 1.0 / 17.0;
+    p = p * z + 1.0 / 15.0;
+    p = p * z + 1.0 / 13.0;
+    p = p * z + 1.0 / 11.0;
+    p = p * z + 1.0 / 9.0;
+    p = p * z + 1.0 / 7.0;
+    p = p * z + 1.0 / 5.0;
+    p = p * z + 1.0 / 3.0;
+    const double two_s = 2.0 * s;
+    const double ln_m = two_s + two_s * (z * p);
+    return (double)e * 0.69314718055994530942 + ln_m;
+}
+
+/* sin and cos of 2 pi u for u in (0, 1], a multiple of 2^-53: 4u = q + t exactly, quadrant q,
+ * t in [0, 1) mirrored to [0, 1/2], so x = t pi / 2 is in [0, pi / 4] (Taylor to x^19). */
+static void sincos_2pi(double u, double *sin_out, double *cos_out) {
+    const double v = 4.0 * u;
+    const int q = (int)v; /* 0 .. 4 */
+    const double t = v - (double)q;
+    const int mirrored = t > 0.5;
+    const double x = (mirrored ? 1.0 - t : t) * 1.57079632679489661923, z = x * x;
+    double ps = -1.0 / 121645100408832000.0; /* -1/19! */
+    ps = ps * z + 1.0 / 355687428096000.0;
+    ps = ps * z - 1.0 / 1307674368000.0;
+    ps = ps * z + 1.0 / 6227020800.0;
+    ps = ps * z - 1.0 / 39916800.0;
+    ps = ps * z + 1.0 / 362880.0;
+    ps = ps * z - 1.0 / 5040.0;
+    ps = ps * z + 1.0 / 120.0;
+    ps = ps * z - 1.0 / 6.0;
+    const double sx = x + x * (z * ps);
+    double pc = 1.0 / 6402373705728000.0; /* 1/18! */
+    pc = pc * z - 1.0 / 20922789888000.0;
+    pc = pc * z + 1.0 / 87178291200.0;
+    pc = pc * z - 1.0 / 479001600.0;
+    pc = pc * z + 1.0 / 3628800.0;
+    pc = pc * z - 1.0 / 40320.0;
+    pc = pc * z + 1.0 / 720.0;
+    pc = pc * z - 1.0 / 24.0;
+    pc = pc * z + 0.5;
+    const double cx = 1.0 - z * pc;
+    /* angle = q pi / 2 + phi, phi = (mirrored ? pi / 2 - x : x): sin and cos swap for an odd
+     * quadrant xor a mirrored phi; sin is negative in quadrants 2, 3, cos in 1, 2. Selects and
+     * exact sign multiplications, no branch: the quadrant is random. */
+    const int swap = (q & 1) ^ mirrored;
+    const double sin_sign = 1.0 - 2.0 * (double)((q >> 1) & 1);
+    const double cos_sign = 1.0 - 2.0 * (double)(((q + 1) >> 1) & 1);
+    *sin_out = (swap ? cx : sx) * sin_sign;
+    *cos_out = (swap ? sx : cx) * cos_sign;
+}
+
+/* x[i * stride] += dither * N(0, 1), i < n <= KALDI_FRAME_LENGTH: pair j draws u1 (radius),
+ * then u2 (angle), and gives samples 2j (cos) and 2j + 1 (sin). */
 static void add_dither(unsigned long long *s, float *x, int n, int stride, float dither) {
-    for (int i = 0; i < n; i += 2) {
-        double r = sqrt(-2.0 * log(rng_uniform(s)));
-        double a = 6.283185307179586476925286766559 * rng_uniform(s);
-        x[(size_t)i * stride] += dither * (float)(r * cos(a));
-        if (i + 1 < n)
-            x[(size_t)(i + 1) * stride] += dither * (float)(r * sin(a));
+    enum { P = (KALDI_FRAME_LENGTH + 1) / 2 };
+    double u1[P], u2[P], g[2 * P];
+    const int pairs = (n + 1) / 2;
+    for (int j = 0; j < pairs; j++) {
+        u1[j] = rng_uniform(s);
+        u2[j] = rng_uniform(s);
     }
+    for (int j = 0; j < pairs; j++) {
+        const double r = sqrt(-2.0 * ln_unit(u1[j]));
+        double sn, cs;
+        sincos_2pi(u2[j], &sn, &cs);
+        g[2 * j] = r * cs;
+        g[2 * j + 1] = r * sn;
+    }
+    for (int i = 0; i < n; i++)
+        x[(size_t)i * stride] += dither * (float)g[i];
 }
 
 /* ---------------------------------------------------------------------------------- */
